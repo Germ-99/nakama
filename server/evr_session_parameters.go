@@ -51,6 +51,7 @@ type SessionParameters struct {
 	isIGPOpen                *atomic.Bool                                 // The user has IGPU open
 	activeSuspensionRecords  map[string]map[string]GuildEnforcementRecord // The active suspension records map[groupID]map[userID]GuildEnforcementRecord
 	ignoreDisabledAlternates bool                                         // Ignore disabled
+	protocolVersion          int                                          // The protocol version
 }
 
 func (s SessionParameters) UserID() string {

@@ -19,18 +19,18 @@ var KnownBuilds = []BuildNumber{
 	PCVRBuild,
 }
 
-// LoginRequest represents a message from client to server requesting for a user sign-in.
-type LoginRequest struct {
+// LoginRequestV2 represents a message from client to server requesting for a user sign-in.
+type LoginRequestV2 struct {
 	PreviousSessionID uuid.UUID // This is the old session id, if it had one.
 	XPID              EvrId
 	Payload           LoginProfile
 }
 
-func (lr LoginRequest) String() string {
+func (lr LoginRequestV2) String() string {
 	return fmt.Sprintf("%T(Session=%s, XPID=%s, HMDSerialNumber=%s, HeadsetType=%s)", lr, lr.PreviousSessionID, lr.XPID, lr.Payload.HMDSerialNumber, lr.Payload.SystemInfo.HeadsetType)
 }
 
-func (m *LoginRequest) Stream(s *EasyStream) error {
+func (m *LoginRequestV2) Stream(s *EasyStream) error {
 	return RunErrorFunctions([]func() error{
 		func() error { return s.StreamGUID(&m.PreviousSessionID) },
 		func() error { return s.StreamNumber(binary.LittleEndian, &m.XPID.PlatformCode) },
@@ -39,15 +39,15 @@ func (m *LoginRequest) Stream(s *EasyStream) error {
 	})
 }
 
-func NewLoginRequest(session uuid.UUID, userId EvrId, loginData LoginProfile) (*LoginRequest, error) {
-	return &LoginRequest{
+func NewLoginRequest(session uuid.UUID, userId EvrId, loginData LoginProfile) (*LoginRequestV2, error) {
+	return &LoginRequestV2{
 		PreviousSessionID: session,
 		XPID:              userId,
 		Payload:           loginData,
 	}, nil
 }
 
-func (m *LoginRequest) GetEvrID() EvrId {
+func (m *LoginRequestV2) GetEvrID() EvrId {
 	return m.XPID
 }
 

@@ -23,6 +23,11 @@ import (
 )
 
 const (
+	ProtocolLoginV1 = iota
+	ProtocolFinalRelease
+)
+
+const (
 	DocumentStorageCollection = "GameDocuments"
 )
 
@@ -96,9 +101,9 @@ func (e NewLocationError) Error() string {
 	}
 }
 
-// loginRequest handles the login request from the client.
-func (p *EvrPipeline) loginRequest(ctx context.Context, logger *zap.Logger, session *sessionWS, in evr.Message) error {
-	request := in.(*evr.LoginRequest)
+// loginRequestV2 handles the login request from the client. (V2, most recent)
+func (p *EvrPipeline) loginRequestV2(ctx context.Context, logger *zap.Logger, session *sessionWS, in evr.Message) error {
+	request := in.(*evr.LoginRequestV2)
 
 	if s := ServiceSettings(); s.DisableLoginMessage != "" {
 		if err := session.SendEvrUnrequire(evr.NewLoginFailure(request.XPID, "System is Temporarily Unavailable:\n"+s.DisableLoginMessage)); err != nil {
@@ -120,6 +125,10 @@ func (p *EvrPipeline) loginRequest(ctx context.Context, logger *zap.Logger, sess
 		return errors.New("session parameters not found")
 	}
 
+	if params.protocolVersion == 0 {
+		// Default to the latest protocol version if not set
+		params.protocolVersion = ProtocolFinalRelease
+	}
 	// Set the basic parameters
 	params.loginSession = session
 	params.xpID = request.XPID
@@ -163,6 +172,80 @@ func (p *EvrPipeline) loginRequest(ctx context.Context, logger *zap.Logger, sess
 	return session.SendEvr(
 		evr.NewLoginSuccess(session.id, request.XPID),
 		unrequireMessage,
+		evr.NewDefaultGameSettings(),
+		unrequireMessage,
+	)
+}
+
+// loginRequest handles the login request from the client.
+func (p *EvrPipeline) loginRequestV1(ctx context.Context, logger *zap.Logger, session *sessionWS, in evr.Message) error {
+	request := in.(*evr.LoginRequestV1)
+
+	if s := ServiceSettings(); s.DisableLoginMessage != "" {
+		if err := session.SendEvrUnrequire(evr.NewLoginFailure(request.XPID, "System is Temporarily Unavailable:\n"+s.DisableLoginMessage)); err != nil {
+			// If there's an error, prefix it with the XPID
+			return fmt.Errorf("failed to send LoginFailure: %w", err)
+		}
+	}
+
+	// Start a timer to add to the metrics
+	timer := time.Now()
+
+	// Load the session parameters.
+	params, ok := LoadParams(ctx)
+	if !ok {
+		return errors.New("session parameters not found")
+	}
+
+	// Set the basic parameters
+	params.protocolVersion = ProtocolLoginV1
+	params.loginSession = session
+	params.xpID = request.XPID
+	params.loginPayload = &evr.LoginProfile{
+		AppId:           uint64(request.Payload.AppID),
+		AccountId:       uint64(request.Payload.AccountID),
+		AccessToken:     request.Payload.AccessToken,
+		LobbyVersion:    uint64(request.Payload.LobbyVersion),
+		Nonce:           request.Payload.Nonce,
+		PublisherLock:   request.Payload.PublisherLock,
+		HMDSerialNumber: request.Payload.HMDSerialNumber,
+	}
+
+	logger = logger.With(zap.String("xpid", request.XPID.String()))
+
+	// Process the login request and populate the session parameters.
+	if err := p.processLoginRequest(ctx, logger, session, &params); err != nil {
+
+		discordID := ""
+		if userID, err := GetUserIDByDeviceID(ctx, p.db, request.XPID.String()); err == nil {
+			discordID = p.discordCache.UserIDToDiscordID(userID)
+		} else if !errors.Is(err, DeviceNotLinkedError{}) {
+			logger.Debug("Failed to get user ID by device ID", zap.Error(err))
+		}
+
+		errMessage := formatLoginErrorMessage(request.XPID, discordID, err)
+
+		return session.SendEvrUnrequire(evr.NewLoginFailure(request.XPID, errMessage))
+	}
+
+	StoreParams(ctx, &params)
+
+	tags := params.MetricsTags()
+
+	tags["app_id"] = strconv.FormatInt(int64(params.loginPayload.AppId), 10)
+	tags["publisher_lock"] = strings.TrimSpace(params.loginPayload.PublisherLock)
+
+	p.nk.metrics.CustomCounter("login_success", tags, 1)
+	p.nk.metrics.CustomTimer("login_process_latency", params.MetricsTags(), time.Since(timer))
+
+	serverProfile, err := NewUserServerProfile(ctx, logger, p.db, p.nk, params.profile, params.xpID, params.profile.ActiveGroupID, []evr.Symbol{evr.ModeArenaPublic}, evr.ModeArenaPublic, params.profile.GetActiveGroupDisplayName())
+	if err != nil {
+		logger.Error("Failed to create user server profile", zap.Error(err))
+		return session.SendEvrUnrequire(evr.NewLoginFailure(request.XPID, "Failed to create user profile. Please try again later."))
+	}
+	return session.SendEvr(
+		evr.NewLoginResult(request.XPID),
+		evr.NewLoginProfileResult(session.id, serverProfile),
 		evr.NewDefaultGameSettings(),
 		unrequireMessage,
 	)

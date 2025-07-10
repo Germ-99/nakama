@@ -63,7 +63,6 @@ func NewNEVRProtobufMessageV1(envelope *rtapi.Envelope) (*NEVRProtobufMessageV1,
 }
 
 func NewMessageFromHash(hash uint64) Message {
-
 	switch hash {
 	case 0x0dabc24265508a82:
 		return &ReconcileIAPResult{}
@@ -145,8 +144,12 @@ func NewMessageFromHash(hash uint64) Message {
 		return &LobbyEntrantsV2{}
 	case 0xa1b9cae1f8588969:
 		return &LobbyEntrantsV3{}
+	case 0x236ccbefa38074c0:
+		return &LoginProfileResult{}
+	case 0x322DA9324131A1B4:
+		return &LoginResult{}
 	case 0xbdb41ea9e67b200a:
-		return &LoginRequest{}
+		return &LoginRequestV2{}
 	case 0xa5acc1a90d0cce47:
 		return &LoginSuccess{}
 	case 0xa5b9d5a3021ccf51:

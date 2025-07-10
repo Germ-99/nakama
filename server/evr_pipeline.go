@@ -417,60 +417,69 @@ func (p *EvrPipeline) ProcessRequestEVR(logger *zap.Logger, session Session, in 
 
 	isAuthenticationRequired := true
 
+	// Legacy Pipeline
 	switch in.(type) {
-
-	// Config service
-	case *evr.ConfigRequest:
+	case *evr.LoginRequestV2:
 		isAuthenticationRequired = false
-		pipelineFn = p.configRequest
+		pipelineFn = p.loginRequestV1
+	}
 
-	// Transaction (IAP) service (unused)
-	case *evr.ReconcileIAP:
-		isAuthenticationRequired = false
-		pipelineFn = p.reconcileIAP
+	if pipelineFn == nil {
+		switch in.(type) {
 
-	// Login/Profile Service
-	case *evr.RemoteLogSet:
-		isAuthenticationRequired = false
-		pipelineFn = p.remoteLogSetv3
-	case *evr.LoginRequest:
-		isAuthenticationRequired = false
-		pipelineFn = p.loginRequest
-	case *evr.DocumentRequest:
-		pipelineFn = p.documentRequest
-	case *evr.LoggedInUserProfileRequest:
-		pipelineFn = p.loggedInUserProfileRequest
-	case *evr.ChannelInfoRequest:
-		pipelineFn = p.channelInfoRequest
-	case *evr.UpdateClientProfile:
-		pipelineFn = p.updateClientProfileRequest
-	case *evr.OtherUserProfileRequest:
-		pipelineFn = p.otherUserProfileRequest
-	case *evr.UserServerProfileUpdateRequest: // Broadcaster only via it's login connection
-		pipelineFn = p.userServerProfileUpdateRequest
-	case *evr.GenericMessage:
-		pipelineFn = p.genericMessage
+		// Config service
+		case *evr.ConfigRequest:
+			isAuthenticationRequired = false
+			pipelineFn = p.configRequest
 
-	// Matchmaker service
-	case *evr.LobbyFindSessionRequest:
-		pipelineFn = p.lobbySessionRequest
-	case *evr.LobbyCreateSessionRequest:
-		pipelineFn = p.lobbySessionRequest
-	case *evr.LobbyJoinSessionRequest:
-		pipelineFn = p.lobbySessionRequest
-	case *evr.LobbyMatchmakerStatusRequest:
-		pipelineFn = p.lobbyMatchmakerStatusRequest
-	case *evr.LobbyPingResponse:
-		pipelineFn = p.lobbyPingResponse
-	case *evr.LobbyPlayerSessionsRequest:
-		pipelineFn = p.lobbyPlayerSessionsRequest
-	case *evr.LobbyPendingSessionCancel:
-		pipelineFn = p.lobbyPendingSessionCancel
+		// Transaction (IAP) service (unused)
+		case *evr.ReconcileIAP:
+			isAuthenticationRequired = false
+			pipelineFn = p.reconcileIAP
 
-	default:
-		pipelineFn = func(ctx context.Context, logger *zap.Logger, session *sessionWS, in evr.Message) error {
-			logger.Warn("Received unhandled message", zap.Any("message", in))
-			return nil
+		// Login/Profile Service
+		case *evr.RemoteLogSet:
+			isAuthenticationRequired = false
+			pipelineFn = p.remoteLogSetv3
+		case *evr.LoginRequestV2:
+			isAuthenticationRequired = false
+			pipelineFn = p.loginRequestV2
+		case *evr.DocumentRequest:
+			pipelineFn = p.documentRequest
+		case *evr.LoggedInUserProfileRequest:
+			pipelineFn = p.loggedInUserProfileRequest
+		case *evr.ChannelInfoRequest:
+			pipelineFn = p.channelInfoRequest
+		case *evr.UpdateClientProfile:
+			pipelineFn = p.updateClientProfileRequest
+		case *evr.OtherUserProfileRequest:
+			pipelineFn = p.otherUserProfileRequest
+		case *evr.UserServerProfileUpdateRequest: // Broadcaster only via it's login connection
+			pipelineFn = p.userServerProfileUpdateRequest
+		case *evr.GenericMessage:
+			pipelineFn = p.genericMessage
+
+		// Matchmaker service
+		case *evr.LobbyFindSessionRequest:
+			pipelineFn = p.lobbySessionRequest
+		case *evr.LobbyCreateSessionRequest:
+			pipelineFn = p.lobbySessionRequest
+		case *evr.LobbyJoinSessionRequest:
+			pipelineFn = p.lobbySessionRequest
+		case *evr.LobbyMatchmakerStatusRequest:
+			pipelineFn = p.lobbyMatchmakerStatusRequest
+		case *evr.LobbyPingResponse:
+			pipelineFn = p.lobbyPingResponse
+		case *evr.LobbyPlayerSessionsRequest:
+			pipelineFn = p.lobbyPlayerSessionsRequest
+		case *evr.LobbyPendingSessionCancel:
+			pipelineFn = p.lobbyPendingSessionCancel
+
+		default:
+			pipelineFn = func(ctx context.Context, logger *zap.Logger, session *sessionWS, in evr.Message) error {
+				logger.Warn("Received unhandled message", zap.Any("message", in))
+				return nil
+			}
 		}
 	}
 
