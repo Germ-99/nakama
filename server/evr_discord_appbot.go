@@ -36,6 +36,10 @@ const (
 	SavedOutfitsStorageKey         = "outfits"
 )
 
+type (
+	ctxGroupIDKey struct{}
+)
+
 type DiscordAppBot struct {
 	sync.Mutex
 
@@ -2908,6 +2912,13 @@ func (d *DiscordAppBot) RegisterSlashCommands() error {
 	dg.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		user, _ := getScopedUserMember(i)
 
+		userID := d.cache.DiscordIDToUserID(user.ID)
+		groupID := d.cache.GuildIDToGroupID(i.GuildID)
+
+		ctx := context.WithValue(d.ctx, ctxUserIDKey{}, userID)
+		ctx = context.WithValue(ctx, ctxGroupIDKey{}, groupID)
+		ctx = context.WithValue(ctx, ctxUsernameKey{}, user.Username)
+
 		logger := d.logger.WithFields(map[string]any{
 			"discord_id": user.ID,
 			"username":   user.Username,
@@ -2932,12 +2943,6 @@ func (d *DiscordAppBot) RegisterSlashCommands() error {
 				err := d.handleInteractionApplicationCommand(ctx, logger, s, i, appCommandName, handler)
 				if err != nil {
 					logger.WithField("err", err).Error("Failed to handle interaction")
-					// Queue the user to be updated in the cache
-					userID := d.cache.DiscordIDToUserID(user.ID)
-					groupID := d.cache.GuildIDToGroupID(i.GuildID)
-					if userID != "" && groupID != "" {
-						d.cache.QueueSyncMember(i.GuildID, user.ID, false)
-					}
 					if err := simpleInteractionResponse(s, i, err.Error()); err != nil {
 						return
 					}
@@ -2976,7 +2981,6 @@ func (d *DiscordAppBot) RegisterSlashCommands() error {
 
 			switch data.Name {
 			case "unlink-headset":
-				userID := d.cache.DiscordIDToUserID(user.ID)
 				if userID == "" {
 					logger.Error("Failed to get user ID")
 					return

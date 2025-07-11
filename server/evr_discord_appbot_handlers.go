@@ -36,6 +36,7 @@ func (d *DiscordAppBot) handleInteractionApplicationCommand(ctx context.Context,
 			return fmt.Errorf("error checking global operator status: %w", err)
 		}
 	}
+
 	// Log the interaction
 	if cID := ServiceSettings().CommandLogChannelID; cID != "" {
 		data := i.ApplicationCommandData()
@@ -87,7 +88,6 @@ func (d *DiscordAppBot) handleInteractionApplicationCommand(ctx context.Context,
 		return simpleInteractionResponse(s, i, "This command can only be used in a guild.")
 	}
 
-	// Global security check
 	switch commandName {
 
 	case "create":
@@ -154,17 +154,8 @@ func (d *DiscordAppBot) handleInteractionApplicationCommand(ctx context.Context,
 
 func (d *DiscordAppBot) handleInteractionMessageComponent(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, commandName, value string) error {
 	nk := d.nk
-	user, member := getScopedUserMember(i)
 
-	if user == nil {
-		return fmt.Errorf("user is nil")
-	}
-	_, _ = user, member
-
-	userID := d.cache.DiscordIDToUserID(user.ID)
-	groupID := d.cache.GuildIDToGroupID(i.GuildID)
-
-	_ = groupID
+	userID := ctx.Value(ctxUserIDKey{}).(string)
 
 	switch commandName {
 	case "approve_ip":
@@ -339,6 +330,9 @@ func (d *DiscordAppBot) handleInteractionMessageComponent(ctx context.Context, l
 		return d.handleSuspendPlayerAddNotes(ctx, logger, s, i, user, member, userID, groupID, value)
 	case "suspend_player_activate":
 		return d.handleSuspendPlayerActivate(ctx, logger, s, i, user, member, userID, groupID, value)
+
+	case "game-service":
+		return d.handleGameServiceCommand(ctx, logger, s, i, value)
 	}
 
 	return nil
