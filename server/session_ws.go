@@ -165,9 +165,20 @@ func NewSessionWS(logger *zap.Logger, config Config, format SessionFormat, sessi
 		}
 	}
 
-	discordID := parseUserQueryFunc(&request, "discordid", 20, discordIDPattern)
-	if v := parseUserQueryFunc(&request, "discord_id", 20, discordIDPattern); v != "" {
-		discordID = v
+	var discordID string
+
+	// If a username is provided, try to resolve it to a Discord ID.
+	if uname := parseUserQueryFunc(&request, "username", 32, nil); uname != "" {
+		if users, err := evrPipeline.nk.UsersGetUsername(ctx, []string{uname}); err == nil && len(users) > 0 {
+			if account, err := evrPipeline.nk.AccountGetId(ctx, users[0].GetId()); err == nil && account != nil {
+				discordID = account.GetCustomId()
+			}
+		}
+	} else {
+		discordID = parseUserQueryFunc(&request, "discordid", 20, discordIDPattern)
+		if v := parseUserQueryFunc(&request, "discord_id", 20, discordIDPattern); v != "" {
+			discordID = v
+		}
 	}
 
 	params := SessionParameters{
