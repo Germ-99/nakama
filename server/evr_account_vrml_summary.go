@@ -1,12 +1,9 @@
 package server
 
 import (
-	"context"
 	"errors"
-	"fmt"
 
 	"github.com/echotools/vrmlgo/v5"
-	"github.com/heroiclabs/nakama-common/runtime"
 )
 
 const (
@@ -82,22 +79,4 @@ func (s *VRMLPlayerSummary) Entitlements() []*VRMLEntitlement {
 	}
 
 	return entitlements
-}
-
-func GetVRMLAccountOwner(ctx context.Context, nk runtime.NakamaModule, vrmlUserID string) (string, error) {
-	// Check if the account is already owned by another user
-	objs, _, err := nk.StorageIndexList(ctx, SystemUserID, StorageIndexVRMLUserID, fmt.Sprintf("+value.userID:%s", vrmlUserID), 100, nil, "")
-	if err != nil {
-		return "", fmt.Errorf("error checking ownership: %w", err)
-	}
-
-	if len(objs.Objects) == 0 {
-		return "", nil
-	}
-
-	return objs.Objects[0].UserId, nil
-}
-
-func VRMLDeviceID(vrmlUserID string) string {
-	return DeviceIDPrefixVRML + vrmlUserID
 }

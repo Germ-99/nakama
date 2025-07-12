@@ -114,14 +114,6 @@ func InitializeEvrRuntimeModule(ctx context.Context, logger runtime.Logger, db *
 			}
 		}()
 
-		// Remove all LinkTickets
-		if err := nk.StorageDelete(ctx, []*runtime.StorageDelete{{
-			Collection: AuthorizationCollection,
-			Key:        LinkTicketKey,
-		}}); err != nil {
-			return fmt.Errorf("unable to delete LinkTickets: %w", err)
-		}
-
 		// Create the core groups
 		if err := createCoreGroups(ctx, logger, db, nk, initializer); err != nil {
 			return fmt.Errorf("unable to create core groups: %w", err)
@@ -620,28 +612,6 @@ func DisconnectUserID(ctx context.Context, nk runtime.NakamaModule, userID strin
 		}
 	}
 	return cnt, nil
-}
-
-func GetUserIDByDeviceID(ctx context.Context, db *sql.DB, deviceID string) (string, error) {
-	query := `
-	SELECT ud.user_id FROM user_device ud WHERE ud.id = $1`
-	var dbUserID string
-	var found = true
-	err := db.QueryRowContext(ctx, query, deviceID).Scan(&dbUserID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			found = false
-		} else {
-			return "", fmt.Errorf("error finding user ID By Evr ID: %w", err)
-		}
-	}
-	if !found {
-		return "", status.Error(codes.NotFound, "user account not found")
-	}
-	if dbUserID == "" {
-		return "", nil
-	}
-	return dbUserID, nil
 }
 
 func GetPartyGroupUserIDs(ctx context.Context, nk runtime.NakamaModule, groupName string) ([]string, error) {

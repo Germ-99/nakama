@@ -555,7 +555,6 @@ func (d *DiscordAppBot) handleVRMLVerify(ctx context.Context, logger runtime.Log
 
 	var (
 		nk = d.nk
-		db = d.db
 	)
 
 	logger = logger.WithFields(map[string]any{
@@ -669,7 +668,7 @@ func (d *DiscordAppBot) handleVRMLVerify(ctx context.Context, logger runtime.Log
 		}
 
 		// Link the accounts
-		if err := LinkVRMLAccount(ctx, db, nk, userID, vrmlUser.ID); err != nil {
+		if err := LinkVRMLAccount(ctx, nk, userID, vrmlUser.ID); err != nil {
 			if err, ok := err.(*AccountAlreadyLinkedError); ok {
 				// Account is already linked to another user
 				logger.WithField("owner_user_id", err.OwnerUserID).Error("Account already linked to another user.")

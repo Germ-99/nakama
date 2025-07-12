@@ -2,11 +2,11 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 
 	"github.com/echotools/vrmlgo/v5"
+	"github.com/gofrs/uuid/v5"
 	"github.com/heroiclabs/nakama-common/runtime"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -14,7 +14,6 @@ import (
 
 const (
 	StorageKeyVRMLAccount = "VRMLAccount"
-	DeviceIDPrefixVRML    = "vrml:"
 )
 
 type VRMLAccountData struct {
@@ -32,7 +31,7 @@ func (e *AccountAlreadyLinkedError) Error() string {
 
 func (a EVRProfile) VRMLUserID() string {
 	for _, d := range a.account.Devices {
-		if playerID, found := strings.CutPrefix(d.Id, DeviceIDPrefixVRML); found {
+		if playerID, found := strings.CutPrefix(d.Id, DevicePrefixVRMLUserID); found {
 			return playerID
 		}
 	}
@@ -40,16 +39,16 @@ func (a EVRProfile) VRMLUserID() string {
 }
 
 // VerifyOwnership verifies that the user owns the VRML account by checking the Discord ID
-func LinkVRMLAccount(ctx context.Context, db *sql.DB, nk runtime.NakamaModule, userID string, vrmlUserID string) error {
+func LinkVRMLAccount(ctx context.Context, nk runtime.NakamaModule, userID string, vrmlUserID string) error {
 	// Link the vrml account to the user
-	if ownerID, err := GetUserIDByDeviceID(ctx, db, VRMLDeviceID(vrmlUserID)); err != nil {
+	if ownerID, _, err := AuthenticateVRMLUser(ctx, nk.(*RuntimeGoNakamaModule).logger, nk.(*RuntimeGoNakamaModule).db, DeviceVRMLUserID(vrmlUserID)); err != nil {
 		if status.Code(err) != codes.NotFound {
-			return fmt.Errorf("failed to get user ID by device ID %s: %w", VRMLDeviceID(vrmlUserID), err)
+			return fmt.Errorf("failed to get user ID by device ID %s: %w", DeviceVRMLUserID(vrmlUserID), err)
 		}
 	} else if ownerID != userID {
 		return &AccountAlreadyLinkedError{OwnerUserID: ownerID}
 	}
-	if err := nk.LinkDevice(ctx, userID, VRMLDeviceID(vrmlUserID)); err != nil {
+	if err := LinkVRMLUser(ctx, nk.(*RuntimeGoNakamaModule).logger, nk.(*RuntimeGoNakamaModule).db, uuid.FromStringOrNil(userID), vrmlUserID); err != nil {
 		return fmt.Errorf("failed to link VRML account: %w", err)
 	}
 	// Queue the event to count matches and assign entitlements

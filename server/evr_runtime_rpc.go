@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
 	"github.com/gofrs/uuid/v5"
 	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/heroiclabs/nakama-common/api"
@@ -484,105 +483,6 @@ func ExportAccountData(ctx context.Context, logger runtime.Logger, db *sql.DB, n
 	}
 */
 
-type DiscordSignInRpcRequest struct {
-	Code             string `json:"code"`
-	OAuthRedirectUrl string `json:"oauth_redirect_url"`
-}
-
-type DiscordSignInRpcResponse struct {
-	SessionToken    string `json:"sessionToken"`
-	DiscordUsername string `json:"discordUsername"`
-}
-
-// DiscordSignInRpc is a function that handles the Discord sign-in RPC.
-// It takes in the context, logger, database connection, Nakama module, and payload as parameters.
-// The function exchanges the provided code for an access token, creates a Discord client,
-// retrieves the Discord user, checks if a user exists with the Discord ID as a Nakama username,
-// creates a user if necessary, gets the account data, relinks the custom ID if necessary,
-// writes the access token to storage, updates the account information, generates a session token,
-// stores the JWT in the user's metadata, and returns the session token and Discord username as a jsonN response.
-// If any error occurs during the process, an error message is returned.
-func DiscordSignInRpc(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
-	logger.WithField("payload", payload).Info("DiscordSignInRpc")
-
-	vars, _ := ctx.Value(runtime.RUNTIME_CTX_ENV).(map[string]string)
-	clientId := vars["DISCORD_CLIENT_ID"]
-	clientSecret := vars["DISCORD_CLIENT_SECRET"]
-	nkUserId := ""
-
-	// Parse the payload into a LoginRequest object
-	var request DiscordSignInRpcRequest
-	if err := json.Unmarshal([]byte(payload), &request); err != nil {
-		logger.WithField("err", err).WithField("payload", payload).Error("Unable to unmarshal payload")
-		return "", runtime.NewError("Unable to unmarshal payload", StatusInvalidArgument)
-	}
-	if request.Code == "" {
-		logger.Error("DiscordSignInRpc: Code is empty")
-		return "", runtime.NewError("Code is empty", StatusInvalidArgument)
-	}
-	if request.OAuthRedirectUrl == "" {
-		logger.Error("DiscordSignInRpc: OAuthRedirectUrl is empty")
-		return "", runtime.NewError("OAuthRedirectUrl is empty", StatusInvalidArgument)
-	}
-
-	// Exchange the code for an access token
-	accessToken, err := ExchangeCodeForAccessToken(logger, request.Code, clientId, clientSecret, request.OAuthRedirectUrl)
-	if err != nil {
-		logger.WithField("err", err).Error("Unable to exchange code for access token")
-		return "", runtime.NewError("Unable to exchange code for access token", StatusInternalError)
-	}
-
-	// Create a Discord client
-	discord, err := discordgo.New("Bearer " + accessToken.AccessToken)
-	if err != nil {
-		logger.WithField("err", err).Error("Unable to create Discord client")
-		return "", runtime.NewError("Unable to create Discord client", StatusInternalError)
-	}
-
-	// Get the Discord user
-	user, err := discord.User("@me")
-	if err != nil {
-		logger.WithField("err", err).Error("Unable to get Discord user")
-		return "", runtime.NewError("Unable to get Discord user", StatusInternalError)
-	}
-
-	// Authenticate/create an account.
-	nkUserId, _, _, err = nk.AuthenticateCustom(ctx, user.ID, user.Username, true)
-	if err != nil {
-		return "", runtime.NewError("Unable to create user", StatusInternalError)
-	}
-
-	// Store the discord token.
-	err = WriteAccessTokenToStorage(ctx, logger, nk, nkUserId, accessToken)
-	if err != nil {
-		logger.WithField("err", err).Error("Unable to write access token to storage")
-		return "", runtime.NewError("Unable to write access token to storage", StatusInternalError)
-	}
-	logger.WithField("user.Username", user.Username).Info("DiscordSignInRpc: Wrote access token to storage")
-
-	expiry := time.Now().UTC().Unix() + 15*60 // 15 minutes
-	// Generate a session token for the user to use to authenticate for device linking
-	sessionToken, _, err := nk.AuthenticateTokenGenerate(nkUserId, user.Username, expiry, nil)
-	if err != nil {
-		logger.WithField("err", err).Error("Unable to generate session token")
-		return "", runtime.NewError("Unable to generate session token", StatusInternalError)
-	}
-
-	// store the jwt in the user's metadata so we can verify it later
-
-	response := DiscordSignInRpcResponse{
-		SessionToken:    sessionToken,
-		DiscordUsername: user.Username,
-	}
-
-	responsejson, err := json.Marshal(response)
-	if err != nil {
-		return "", runtime.NewError(fmt.Sprintf("error marshalling LoginSuccess response: %v", err), StatusInternalError)
-	}
-
-	return string(responsejson), nil
-}
-
 // LinkDeviceRpc is a function that handles the linking of a device to a user account.
 // It takes in the context, logger, database connection, Nakama module, and payload as parameters.
 // The payload should be a jsonN string containing the session token and link code.
@@ -627,7 +527,7 @@ func LinkDeviceRpc(ctx context.Context, logger runtime.Logger, db *sql.DB, nk ru
 	}
 
 	// Verify the session token and extract the user ID
-	token, err := verifySignedJWT(request.SessionToken, vars["SESSION_ENCRYPTION_KEY"])
+	token, err := VerifySignedJWT(request.SessionToken, vars["SESSION_ENCRYPTION_KEY"])
 	if err != nil {
 		logger.WithField("err", err).Error("Unable to verify session token")
 		return "", runtime.NewError("Unable to verify session token", StatusInternalError)
@@ -635,13 +535,13 @@ func LinkDeviceRpc(ctx context.Context, logger runtime.Logger, db *sql.DB, nk ru
 	uid := token.Claims.(jwt.MapClaims)["uid"].(string)
 
 	// Exchange the link code for an auth token and remove the link code
-	ticket, err := ExchangeLinkCode(ctx, nk, logger, request.LinkCode)
+	xpid, _, _, err := ExchangeLinkCode(ctx, nk, logger, request.LinkCode)
 	if err != nil {
 		return "", err
 	}
 
 	// Link the device to the user account
-	if err := nk.LinkDevice(ctx, uid, ticket.XPID.Token()); err != nil {
+	if err := LinkXPID(ctx, nk.(*RuntimeGoNakamaModule).logger, db, uuid.FromStringOrNil(uid), xpid); err != nil {
 		logger.WithField("err", err).Error("Unable to link device")
 		return "", runtime.NewError("Unable to link device", StatusInternalError)
 	}
@@ -684,18 +584,18 @@ func LinkUserIdDeviceRpc(ctx context.Context, logger runtime.Logger, db *sql.DB,
 		logger.WithField("err", err).Error("Unable to verify userId")
 		return "fail", runtime.NewError("Unable to verify userId", StatusNotFound)
 	}
-	userId := userIds[0].GetId()
+	userID := userIds[0].GetId()
 
 	// Exchange the link code for an auth token and remove the link code
-	ticket, err := ExchangeLinkCode(ctx, nk, logger, request.LinkCode)
+	xpID, _, payload, err := ExchangeLinkCode(ctx, nk, logger, request.LinkCode)
 	if err != nil {
 		return "fail", err
 	}
 
 	// Link the device to the user account
-	if err := nk.LinkDevice(ctx, userId, ticket.XPID.Token()); err != nil {
+	if err := LinkXPID(ctx, nk.(*RuntimeGoNakamaModule).logger, db, uuid.FromStringOrNil(userID), xpID); err != nil {
 		logger.WithField("err", err).Error("Unable to link device")
-		return "", runtime.NewError("Unable to link device", StatusInternalError)
+		return "fail", runtime.NewError("Unable to link device", StatusInternalError)
 	}
 
 	// Return "success" and nil error on successful execution
@@ -1825,7 +1725,7 @@ func UserServerProfileRPC(ctx context.Context, logger runtime.Logger, db *sql.DB
 	case !request.UserID.IsNil():
 
 	case !request.XPID.IsNil():
-		if userID, err := GetUserIDByDeviceID(ctx, db, request.XPID.String()); err != nil {
+		if userID, err := GetUserIDByXPID(ctx, db, request.XPID); err != nil {
 			return "", fmt.Errorf("failed to get user ID by xp_id: %w", err)
 		} else {
 			request.UserID = uuid.FromStringOrNil(userID)
@@ -1845,14 +1745,11 @@ func UserServerProfileRPC(ctx context.Context, logger runtime.Logger, db *sql.DB
 		return "", fmt.Errorf("failed to load EVR profile: %w", err)
 	}
 
-	if request.XPID.IsNil() && len(evrProfile.account.Devices) == 0 {
+	xpids := evrProfile.XPIDs()
+	if request.XPID.IsNil() && len(xpids) == 0 {
 		return "", runtime.NewError("No devices found for user", StatusNotFound)
 	} else {
-		if xpid, err := evr.ParseEvrId(evrProfile.account.Devices[0].Id); err != nil {
-			return "", fmt.Errorf("failed to parse xp_id `%s`: %w", evrProfile.account.Devices[0].Id, err)
-		} else {
-			request.XPID = *xpid
-		}
+		request.XPID = xpids[0]
 	}
 
 	switch {

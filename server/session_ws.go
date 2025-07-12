@@ -113,7 +113,7 @@ type (
 	ctxLoggedInAtKey        struct{} // The time the user logged in
 )
 
-func NewSessionWS(logger *zap.Logger, config Config, format SessionFormat, sessionID, userID uuid.UUID, username string, vars map[string]string, expiry int64, clientIP, clientPort, lang string, protojsonMarshaler *protojson.MarshalOptions, protojsonUnmarshaler *protojson.UnmarshalOptions, conn *websocket.Conn, sessionRegistry SessionRegistry, statusRegistry StatusRegistry, matchmaker Matchmaker, tracker Tracker, metrics Metrics, pipeline *Pipeline, evrPipeline *EvrPipeline, runtime *Runtime, request http.Request, storageIndex StorageIndex) Session {
+func NewSessionWS(logger *zap.Logger, config Config, format SessionFormat, sessionID, userID uuid.UUID, username string, vars map[string]string, expiry int64, clientIP, clientPort, lang string, protojsonMarshaler *protojson.MarshalOptions, protojsonUnmarshaler *protojson.UnmarshalOptions, conn *websocket.Conn, sessionRegistry SessionRegistry, statusRegistry StatusRegistry, matchmaker Matchmaker, tracker Tracker, metrics Metrics, pipeline *Pipeline, evrPipeline *EvrPipeline, runtime *Runtime, request http.Request, storageIndex StorageIndex, tokenID string) Session {
 	logger = logger.With(zap.String("sid", sessionID.String()))
 
 	if !userID.IsNil() {
@@ -123,7 +123,7 @@ func NewSessionWS(logger *zap.Logger, config Config, format SessionFormat, sessi
 		logger = logger.With(zap.String("username", username))
 	}
 
-	logger.Info("New WebSocket session connected", zap.String("request_uri", request.URL.Path), zap.String("query", request.URL.RawQuery), zap.Uint8("format", uint8(format)), zap.String("client_ip", clientIP), zap.String("client_port", clientPort))
+	logger.Info("New WebSocket session connected", zap.String("request_uri", request.URL.Path), zap.Uint8("format", uint8(format)), zap.String("client_address", clientIP+":"+clientPort))
 
 	// Support Cloudflare
 	if ip := request.Header.Get("CF-Connecting-IP"); ip != "" {
@@ -135,6 +135,7 @@ func NewSessionWS(logger *zap.Logger, config Config, format SessionFormat, sessi
 	ctx = context.WithValue(ctx, ctxVarsKey{}, vars)     // apiServer compatibility
 	ctx = context.WithValue(ctx, ctxExpiryKey{}, expiry) // apiServer compatibility
 
+	ctx = context.WithValue(ctx, ctxTokenIDKey{}, tokenID)
 	ctx = context.WithValue(ctx, ctxLoggedInAtKey{}, time.Now().UTC())
 	// Add the URL parameters to the context
 	urlParams := make(map[string][]string, 0)

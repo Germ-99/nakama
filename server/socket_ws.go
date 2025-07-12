@@ -75,17 +75,23 @@ func NewSocketWsAcceptor(logger *zap.Logger, config Config, sessionRegistry Sess
 		}
 
 		var (
-			ok       bool              = false
-			userID   uuid.UUID         = uuid.Nil
-			username string            = ""
-			vars     map[string]string = nil
-			expiry   int64             = 0
+			ok       bool
+			userID   uuid.UUID
+			username string
+			vars     map[string]string
+			expiry   int64
+			tokenID  string
 		)
 		switch format {
 		case SessionFormatEVR:
+			// EVR sessions use a different authentication mechanism.
+			// The token is expected to be the server key or a session token.
 			if token != config.GetSocket().ServerKey {
-				http.Error(w, "Missing or invalid token", 401)
-				return
+				userID, username, vars, expiry, tokenID, _, ok = parseToken([]byte(config.GetSession().EncryptionKey), token)
+				if !ok {
+					http.Error(w, "Missing or invalid token", 401)
+					return
+				}
 			}
 		default:
 			userID, username, vars, expiry, _, _, ok = parseToken([]byte(config.GetSession().EncryptionKey), token)
@@ -120,7 +126,7 @@ func NewSocketWsAcceptor(logger *zap.Logger, config Config, sessionRegistry Sess
 		// hands off the authenticated session to the main consumer.
 
 		// Wrap the connection for application handling.
-		session := NewSessionWS(logger, config, format, sessionID, userID, username, vars, expiry, clientIP, clientPort, lang, protojsonMarshaler, protojsonUnmarshaler, conn, sessionRegistry, statusRegistry, matchmaker, tracker, metrics, pipeline, evrPipeline, runtime, *r, storageIndex)
+		session := NewSessionWS(logger, config, format, sessionID, userID, username, vars, expiry, clientIP, clientPort, lang, protojsonMarshaler, protojsonUnmarshaler, conn, sessionRegistry, statusRegistry, matchmaker, tracker, metrics, pipeline, evrPipeline, runtime, *r, storageIndex, tokenID)
 
 		// Add to the session registry.
 		sessionRegistry.Add(session)

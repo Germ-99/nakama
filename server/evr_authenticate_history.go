@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,8 +13,6 @@ import (
 
 	"github.com/heroiclabs/nakama-common/runtime"
 	"github.com/heroiclabs/nakama/v3/server/evr"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 const (
@@ -611,30 +608,4 @@ func LoginHistoryRegexSearch(ctx context.Context, nk runtime.NakamaModule, patte
 		}
 	}
 	return userIDs, nil
-}
-
-func AccountGetDeviceID(ctx context.Context, db *sql.DB, nk runtime.NakamaModule, deviceID string) (*EVRProfile, error) {
-	found := true
-
-	// Look for an existing account.
-	query := "SELECT user_id FROM user_device WHERE id = $1"
-	var dbUserID string
-	err := db.QueryRowContext(ctx, query, deviceID).Scan(&dbUserID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			found = false
-		} else {
-			return nil, status.Error(codes.Internal, "Error finding user account by device id.")
-		}
-	}
-
-	if found {
-		if account, err := nk.AccountGetId(ctx, dbUserID); err != nil {
-			return nil, status.Error(codes.Internal, "Error finding user account by device id.")
-		} else {
-			return BuildEVRProfileFromAccount(account)
-		}
-	}
-
-	return nil, status.Error(codes.NotFound, "User account not found.")
 }

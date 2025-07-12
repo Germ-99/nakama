@@ -35,6 +35,9 @@ type GroupMetadata struct {
 	SuspensionInheritanceGroupIDs        []string          `json:"suspension_inheritence_group_ids"`         // Groups that this group inherits suspensions from
 	DisplayNameForceNickToIGN            bool              `json:"force_nick_to_ign"`                        // Force nicknames to be the same as the in-game name
 	DisplayNameInUseNotifications        bool              `json:"display_name_in_use_notifications"`        // Display name in use notification on nick change
+	EnableServerShareAllowLists          bool              `json:"enable_server_share_allow_lists"`          // Enable server share allow lists
+	ServerShareToGuildIDs                []string          `json:"server_share_to_guild_ids"`                // Guilds that are allowed to borrow (e.g. via /borrow) game servers for this group
+	ServerShareFromGuildIDs              []string          `json:"server_share_from_guild_ids"`              // Guilds that are allowed to use (e.g. via /join) game servers for this group
 }
 
 func NewGuildGroupMetadata(guildID string) *GroupMetadata {
@@ -50,22 +53,6 @@ func (g *GroupMetadata) MarshalMap() map[string]any {
 	data, _ := json.Marshal(g)
 	_ = json.Unmarshal(data, &m)
 	return m
-}
-
-func (g *GroupMetadata) MarshalToMap() (map[string]interface{}, error) {
-
-	guildGroupBytes, err := json.Marshal(g)
-	if err != nil {
-		return nil, err
-	}
-
-	var guildGroupMap map[string]interface{}
-	err = json.Unmarshal(guildGroupBytes, &guildGroupMap)
-	if err != nil {
-		return nil, err
-	}
-
-	return guildGroupMap, nil
 }
 
 func GroupMetadataLoad(ctx context.Context, db *sql.DB, groupID string) (*GroupMetadata, error) {

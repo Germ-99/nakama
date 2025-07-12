@@ -2,8 +2,6 @@ package server
 
 import (
 	"context"
-	"fmt"
-	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/heroiclabs/nakama-common/runtime"
@@ -95,9 +93,9 @@ func (d *DiscordAppBot) handleSuspendPlayerLookup(ctx context.Context, logger ru
 	}
 
 	opts := UserProfileRequestOptions{
-		IncludeSuspensionsEmbed:     true,
-		IncludePastSuspensions:      true,
-		IncludeInactiveSuspensions:  true,
+		IncludeSuspensionsEmbed:       true,
+		IncludePastSuspensions:        true,
+		IncludeInactiveSuspensions:    true,
 		IncludeSuspensionAuditorNotes: true,
 	}
 

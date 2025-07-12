@@ -2,14 +2,20 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/gofrs/uuid/v5"
 	"github.com/heroiclabs/nakama-common/api"
 	"github.com/heroiclabs/nakama-common/runtime"
 	"github.com/heroiclabs/nakama/v3/server/evr"
+	"github.com/jackc/pgx/v5/pgconn"
+	"go.uber.org/zap"
 )
 
 type GuildGroup struct {
@@ -312,4 +318,84 @@ func GuildUserGroupsList(ctx context.Context, nk runtime.NakamaModule, guildGrou
 		}
 	}
 	return guildGroups, nil
+}
+
+func CreateGuildGroup(ctx context.Context, logger *zap.Logger, db *sql.DB, guildID string, userID uuid.UUID, creatorID uuid.UUID, name, lang, desc, avatarURL, metadata string, open bool, maxCount int) (*api.Group, error) {
+	if userID == uuid.Nil {
+		return nil, runtime.ErrGroupCreatorInvalid
+	}
+
+	state := 1
+	if open {
+		state = 0
+	}
+
+	params := []interface{}{SnowflakeToUUID(guildID), creatorID, name, desc, avatarURL, state}
+	statements := []string{"$1", "$2", "$3", "$4", "$5", "$6"}
+
+	query := "INSERT INTO groups(id, creator_id, name, description, avatar_url, state"
+
+	// Add lang tag if any.
+	if lang != "" {
+		query += ", lang_tag"
+		params = append(params, lang)
+		statements = append(statements, "$"+strconv.Itoa(len(params)))
+	}
+	// Add max count if any.
+	if maxCount > 0 {
+		query += ", max_count"
+		params = append(params, maxCount)
+		statements = append(statements, "$"+strconv.Itoa(len(params)))
+	}
+	// Add metadata if any.
+	if metadata != "" {
+		query += ", metadata"
+		params = append(params, metadata)
+		statements = append(statements, "$"+strconv.Itoa(len(params)))
+	}
+
+	// Add the trailing edge count value.
+	query += `, edge_count) VALUES (` + strings.Join(statements, ",") + `,1)
+RETURNING id, creator_id, name, description, avatar_url, state, edge_count, lang_tag, max_count, metadata, create_time, update_time`
+
+	var group *api.Group
+
+	if err := ExecuteInTx(ctx, db, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, query, params...)
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == dbErrorUniqueViolation {
+				logger.Info("Could not create group as it already exists.", zap.String("name", name))
+				return runtime.ErrGroupNameInUse
+			}
+			logger.Debug("Could not create group.", zap.Error(err))
+			return err
+		}
+		// Rows closed in groupConvertRows()
+
+		groups, _, err := groupConvertRows(rows, 1)
+		if err != nil {
+			logger.Debug("Could not parse rows.", zap.Error(err))
+			return err
+		}
+
+		group = groups[0]
+		_, err = groupAddUser(ctx, db, tx, uuid.Must(uuid.FromString(group.Id)), userID, 0)
+		if err != nil {
+			logger.Debug("Could not add user to group.", zap.Error(err))
+			return err
+		}
+
+		return nil
+	}); err != nil {
+		if errors.Is(err, runtime.ErrGroupNameInUse) {
+			return nil, runtime.ErrGroupNameInUse
+		}
+		logger.Error("Error creating group.", zap.Error(err))
+		return nil, err
+	}
+
+	logger.Info("Group created.", zap.String("group_id", group.Id), zap.String("user_id", userID.String()))
+
+	return group, nil
 }

@@ -353,7 +353,7 @@ func (c *DiscordIntegrator) syncMember(ctx context.Context, logger *zap.Logger, 
 		return fmt.Errorf("error building evr account: %w", err)
 	}
 
-	groups, err := GuildUserGroupsList(ctx, c.nk, c.guildGroupRegistry, userID)
+	groups, err := GuildUserGroupsList(ctx, c.nk, c.guildGroupRegistry, account.User.GetId())
 	if err != nil {
 		return fmt.Errorf("error getting user guild groups: %w", err)
 	}
@@ -363,8 +363,9 @@ func (c *DiscordIntegrator) syncMember(ctx context.Context, logger *zap.Logger, 
 		if err := c.nk.GroupUsersAdd(ctx, SystemUserID, groupID, []string{profile.ID()}); err != nil {
 			return fmt.Errorf("error joining group: %w", err)
 		}
-		// Refresh group data
-		groups, err = GuildUserGroupsList(ctx, c.nk, c.guildGroupRegistry, userID)
+
+		// Get the group data again
+		groups, err = GuildUserGroupsList(ctx, c.nk, c.guildGroupRegistry, account.User.GetId())
 		if err != nil {
 			return fmt.Errorf("error getting user guild groups: %w", err)
 		}
@@ -479,7 +480,7 @@ func (d *DiscordIntegrator) guildSync(ctx context.Context, logger *zap.Logger, g
 			return fmt.Errorf("failed to get guild owner: %w", err)
 		}
 
-		ownerUserID, _, _, err = AuthenticateCustom(ctx, logger, d.db, ownerMember.User.ID, ownerMember.User.Username, true)
+		ownerUserID, _, _, err = AuthenticateDiscord(ctx, logger, d.db, ownerMember.User.ID, true)
 		if err != nil {
 			// Leave guilds where the owner is globally banned.
 			if status.Code(err) == codes.PermissionDenied {
@@ -520,13 +521,12 @@ func (d *DiscordIntegrator) guildSync(ctx context.Context, logger *zap.Logger, g
 				gm.SuspensionInheritanceGroupIDs = []string{serviceGroupID}
 			}
 		}
-
-		metadataMap, err := gm.MarshalToMap()
+		metadata, err := json.Marshal(gm)
 		if err != nil {
-			return fmt.Errorf("error marshalling guild group metadata: %w", err)
+			return fmt.Errorf("error marshalling guild metadata: %w", err)
 		}
 
-		group, err := d.nk.GroupCreate(ctx, ownerUserID, guild.Name, botUserID, GuildGroupLangTag, guild.Description, guild.IconURL("512"), false, metadataMap, 100000)
+		group, err := CreateGuildGroup(ctx, d.logger, d.db, guild.ID, uuid.FromStringOrNil(ownerUserID), uuid.FromStringOrNil(botUserID), guild.Name, GuildGroupLangTag, guild.Description, guild.IconURL("512"), string(metadata), false, 100000)
 		if err != nil {
 			return fmt.Errorf("error creating group: %w", err)
 		}

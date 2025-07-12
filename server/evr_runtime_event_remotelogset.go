@@ -193,7 +193,7 @@ func (s *EventRemoteLogSet) Process(ctx context.Context, logger runtime.Logger, 
 				continue
 			}
 
-			userID, err := GetUserIDByDeviceID(ctx, db, s.XPID.String())
+			userID, err := GetUserIDByXPID(ctx, db, s.XPID)
 			if err != nil {
 				logger.WithField("error", err).Debug("Failed to get user ID by evr ID")
 				continue

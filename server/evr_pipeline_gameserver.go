@@ -93,7 +93,7 @@ func (p *EvrPipeline) gameserverRegistrationRequest(logger *zap.Logger, session 
 	}
 
 	if session.userID.IsNil() {
-		return errFailedRegistration(session, logger, errors.New("game server is not authenticated."), evr.BroadcasterRegistration_Unknown)
+		return errFailedRegistration(session, logger, errors.New("game server is not authenticated"), evr.BroadcasterRegistration_Unknown)
 	}
 
 	ctx := session.Context()

@@ -113,8 +113,8 @@ func (w *WhoAmI) createUserAccountDetailsEmbed() *discordgo.MessageEmbed {
 
 	if w.opts.IncludeLinkedDevices {
 		// Build a list of the players linked devices/XPIDs
-		xpidStrs := make([]string, 0, len(w.profile.LinkedXPIDs()))
-		for _, xpid := range w.profile.LinkedXPIDs() {
+		xpidStrs := make([]string, 0, len(w.profile.XPIDs()))
+		for _, xpid := range w.profile.XPIDs() {
 			if w.opts.StripIPAddresses {
 				xpidStrs = append(xpidStrs, xpid.String())
 			}

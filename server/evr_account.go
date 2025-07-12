@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -59,32 +60,33 @@ func (p *GroupProfile) UpdateUnlockedItems(updated []evr.Symbol) {
 }
 
 type EVRProfile struct {
-	Debug                     bool                   `json:"debug"`                        // Enable debug mode
-	GlobalBanReason           string                 `json:"global_ban_reason"`            // The global ban reason
-	DisabledAccountMessage    string                 `json:"disabled_account_message"`     // The disabled account message that the user will see.
-	DisplayNameOverride       string                 `json:"display_name_override"`        // The display name override
-	GuildDisplayNameOverrides map[string]string      `json:"guild_display_name_overrides"` // The display name overrides for each guild map[groupID]displayName
-	InGameNames               map[string]string      `json:"group_display_names"`          // The display names for each guild map[groupID]displayName
-	ActiveGroupID             string                 `json:"active_group_id"`              // The active group ID
-	DiscordDebugMessages      bool                   `json:"discord_debug_messages"`       // Enable debug messages in Discord
-	RelayMessagesToDiscord    bool                   `json:"relay_messages_to_discord"`    // Relay messages to Discord
-	TeamName                  string                 `json:"team_name"`                    // The team name
-	DisableAFKTimeout         bool                   `json:"disable_afk_timeout"`          // Disable AFK detection
-	AllowBrokenCosmetics      bool                   `json:"allow_broken_cosmetics"`       // Allow broken cosmetics
-	EnableAllCosmetics        bool                   `json:"enable_all_cosmetics"`         // Enable all cosmetics
-	IsGlobalDeveloper         bool                   `json:"is_global_developer"`          // Is a global developer
-	IsGlobalOperator          bool                   `json:"is_global_operator"`           // Is a global operator
-	GoldDisplayNameActive     bool                   `json:"gold_display_name"`            // The gold name display name
-	LoadoutCosmetics          AccountCosmetics       `json:"cosmetic_loadout"`             // The equipped cosmetics
-	CombatLoadout             CombatLoadout          `json:"combat_loadout"`               // The combat loadout
-	MutedPlayers              []evr.EvrId            `json:"muted_players"`                // The muted players
-	GhostedPlayers            []evr.EvrId            `json:"ghosted_players"`              // The ghosted players
-	NewUnlocks                []int64                `json:"new_unlocks"`                  // The new unlocks
-	GamePauseSettings         *evr.GamePauseSettings `json:"game_pause_settings"`          // The game settings
-	LegalConsents             evr.LegalConsents      `json:"legal_consents"`               // The legal consents
-	CustomizationPOIs         *evr.Customization     `json:"customization_pois"`           // The customization POIs
-	MatchmakingDivision       string                 `json:"matchmaking_division"`         // The matchmaking division (e.g. bronze, silver, gold, etc.)
-	account                   *api.Account
+	Debug                      bool                   `json:"debug"`                        // Enable debug mode
+	GlobalBanReason            string                 `json:"global_ban_reason"`            // The global ban reason
+	DisabledAccountMessage     string                 `json:"disabled_account_message"`     // The disabled account message that the user will see.
+	DisplayNameOverride        string                 `json:"display_name_override"`        // The display name override
+	GuildDisplayNameOverrides  map[string]string      `json:"guild_display_name_overrides"` // The display name overrides for each guild map[groupID]displayName
+	InGameNames                map[string]string      `json:"group_display_names"`          // The display names for each guild map[groupID]displayName
+	ActiveGroupID              string                 `json:"active_group_id"`              // The active group ID
+	DiscordDebugMessages       bool                   `json:"discord_debug_messages"`       // Enable debug messages in Discord
+	RelayMessagesToDiscord     bool                   `json:"relay_messages_to_discord"`    // Relay messages to Discord
+	TeamName                   string                 `json:"team_name"`                    // The team name
+	DisableAFKTimeout          bool                   `json:"disable_afk_timeout"`          // Disable AFK detection
+	AllowBrokenCosmetics       bool                   `json:"allow_broken_cosmetics"`       // Allow broken cosmetics
+	EnableAllCosmetics         bool                   `json:"enable_all_cosmetics"`         // Enable all cosmetics
+	IsGlobalDeveloper          bool                   `json:"is_global_developer"`          // Is a global developer
+	IsGlobalOperator           bool                   `json:"is_global_operator"`           // Is a global operator
+	GoldDisplayNameActive      bool                   `json:"gold_display_name"`            // The gold name display name
+	LoadoutCosmetics           AccountCosmetics       `json:"cosmetic_loadout"`             // The equipped cosmetics
+	CombatLoadout              CombatLoadout          `json:"combat_loadout"`               // The combat loadout
+	MutedPlayers               []evr.EvrId            `json:"muted_players"`                // The muted players
+	GhostedPlayers             []evr.EvrId            `json:"ghosted_players"`              // The ghosted players
+	NewUnlocks                 []int64                `json:"new_unlocks"`                  // The new unlocks
+	GamePauseSettings          *evr.GamePauseSettings `json:"game_pause_settings"`          // The game settings
+	LegalConsents              evr.LegalConsents      `json:"legal_consents"`               // The legal consents
+	CustomizationPOIs          *evr.Customization     `json:"customization_pois"`           // The customization POIs
+	MatchmakingDivision        string                 `json:"matchmaking_division"`         // The matchmaking division (e.g. bronze, silver, gold, etc.)
+	RequireTokenAuthentication bool                   `json:"require_token_authentication"` // Require token authentication
+	account                    *api.Account
 }
 
 func BuildEVRProfileFromAccount(account *api.Account) (*EVRProfile, error) {
@@ -122,19 +124,26 @@ func (e EVRProfile) IsLinked() bool {
 }
 
 func (e EVRProfile) XPIDs() []evr.EvrId {
-	xpids := make([]evr.EvrId, 0, len(e.account.Devices))
+	var xpids []evr.EvrId
 	for _, d := range e.account.Devices {
-		xpid, err := evr.ParseEvrId(d.Id)
-		if err != nil || xpid == nil {
-			continue
+		if xpidStr, ok := strings.CutPrefix(d.Id, DevicePrefixXPID); ok {
+			if xpid, err := evr.ParseEvrId(xpidStr); err == nil && xpid != nil {
+				xpids = append(xpids, *xpid)
+			}
 		}
-		xpids = append(xpids, *xpid)
 	}
 	return xpids
 }
 
 func (e EVRProfile) HasPasswordSet() bool {
 	return e.account.GetEmail() != ""
+}
+
+func (e EVRProfile) TokenAuthRequired() bool {
+	if e.RequireTokenAuthentication {
+		return true
+	}
+	return false
 }
 
 func (e EVRProfile) IsOnline() bool {
@@ -151,16 +160,6 @@ func (e EVRProfile) CreatedAt() time.Time {
 
 func (e EVRProfile) UpdatedAt() time.Time {
 	return e.account.User.GetUpdateTime().AsTime()
-}
-
-func (e EVRProfile) LinkedXPIDs() []evr.EvrId {
-	devices := make([]evr.EvrId, 0, len(e.account.Devices))
-	for _, d := range e.account.Devices {
-		if xpid, err := evr.ParseEvrId(d.Id); err == nil && xpid != nil {
-			devices = append(devices, *xpid)
-		}
-	}
-	return devices
 }
 
 func (a EVRProfile) ID() string {

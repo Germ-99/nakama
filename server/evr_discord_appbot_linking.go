@@ -2,124 +2,147 @@ package server
 
 import (
 	"context"
-	"errors"
+	"database/sql"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/gofrs/uuid/v5"
 	"github.com/heroiclabs/nakama-common/runtime"
 	"github.com/heroiclabs/nakama/v3/server/evr"
-	"go.uber.org/zap"
 )
 
-func (d *DiscordAppBot) linkHeadset(ctx context.Context, logger runtime.Logger, user *discordgo.Member, linkCode string) error {
+// linkHeadset links a headset to a user account.
+func (d *DiscordAppBot) linkHeadset(ctx context.Context, db *sql.DB, logger runtime.Logger, discordID, linkCode string) (err error) {
+	nk := d.nk
 
-	var (
-		nk        = d.nk
-		groupID   = d.cache.GuildIDToGroupID(user.GuildID)
-		userID    = d.cache.DiscordIDToUserID(user.User.ID) // Will be blank for new users
-		discordID = user.User.ID
-		username  = user.User.Username
-	)
-
-	// Validate the link code as a 4 character string
-	if len(linkCode) != 4 {
-		return errors.New("invalid link code: link code must be (4) letters long (i.e. ABCD)")
+	// Exchange the code for the data
+	xpID, clientIP, payload, err := ExchangeLinkCode(ctx, nk, logger, linkCode)
+	if err != nil {
+		return fmt.Errorf("failed to exchange link code: %w", err)
 	}
 
-	if err := func() error {
+	// Authenticate/create an account.
+	userID, _, _, err := AuthenticateDiscord(ctx, RuntimeLoggerToZapLogger(logger), db, discordID, true)
+	if err != nil {
+		return fmt.Errorf("failed to authenticate (or create) user %s: %w", discordID, err)
+	}
 
-		// Exchange the link code for a device auth.
-		ticket, err := ExchangeLinkCode(ctx, nk, logger, linkCode)
-		if err != nil {
-			return fmt.Errorf("failed to exchange link code: %w", err)
-		}
+	// Link the headset to the user account.
+	if err := LinkXPID(ctx, RuntimeLoggerToZapLogger(logger), db, uuid.FromStringOrNil(userID), xpID); err != nil {
+		return fmt.Errorf("failed to link headset: %w", err)
+	}
 
-		tags := map[string]string{
-			"group_id":     groupID,
-			"headset_type": normalizeHeadsetType(ticket.LoginProfile.SystemInfo.HeadsetType),
-			"is_pcvr":      fmt.Sprintf("%t", ticket.LoginProfile.BuildNumber != evr.StandaloneBuildNumber),
-			"new_account":  "false",
-		}
+	// Validate the XPID
+	profile := evr.LoginProfile{}
+	if err := json.Unmarshal([]byte(payload), &payload); err != nil {
+		return fmt.Errorf("failed to unmarshal login profile: %w", err)
+	}
 
-		// Authenticate/create an account.
-		if userID == "" {
-			tags["new_account"] = "true"
-			userID, _, _, err = d.nk.AuthenticateCustom(ctx, discordID, username, true)
-			if err != nil {
-				return fmt.Errorf("failed to authenticate (or create) user %s: %w", discordID, err)
-			}
-		}
+	// Set the client IP as authorized in the LoginHistory
+	history := &LoginHistory{}
+	if err := StorageRead(ctx, nk, userID, history, true); err != nil {
+		return fmt.Errorf("failed to load login history: %w", err)
+	}
+	history.Update(xpID, clientIP, &profile, true)
 
-		if err := d.nk.GroupUsersAdd(ctx, SystemUserID, groupID, []string{userID}); err != nil {
+	// Save the login history.
+	if err := StorageWrite(ctx, nk, userID, history); err != nil {
+		return fmt.Errorf("failed to save login history: %w", err)
+	}
+
+	// Record the link event in metrics.
+	tags := map[string]string{
+		"headset_type": normalizeHeadsetType(profile.SystemInfo.HeadsetType),
+		"is_pcvr":      fmt.Sprintf("%t", profile.BuildNumber != evr.StandaloneBuildNumber),
+		"new_account":  "false",
+	}
+
+	if gg, ok := ctx.Value(ctxGuildGroupKey{}).(*GuildGroup); ok && gg != nil {
+		// Add the user to the group.
+		if err := d.nk.GroupUsersAdd(ctx, SystemUserID, gg.IDStr(), []string{userID}); err != nil {
 			return fmt.Errorf("error joining group: %w", err)
 		}
-
-		if err := nk.LinkDevice(ctx, userID, ticket.XPID.Token()); err != nil {
-			return fmt.Errorf("failed to link headset: %w", err)
-		}
-		d.metrics.CustomCounter("link_headset", tags, 1)
-		// Set the client IP as authorized in the LoginHistory
-		history := &LoginHistory{}
-		if err := StorageRead(ctx, nk, userID, history, true); err != nil {
-			return fmt.Errorf("failed to load login history: %w", err)
-		}
-		history.Update(ticket.XPID, ticket.ClientIP, ticket.LoginProfile, true)
-
-		if err := StorageWrite(ctx, nk, userID, history); err != nil {
-			return fmt.Errorf("failed to save login history: %w", err)
-		}
-
-		return nil
-	}(); err != nil {
-		logger.WithFields(map[string]interface{}{
-			"discord_id": discordID,
-			"link_code":  linkCode,
-			"error":      err,
-		}).Error("Failed to link headset")
-		return err
+		tags["guild_id"] = gg.GuildID
 	}
+
+	d.metrics.CustomCounter("link_headset", tags, 1)
 	return nil
 }
 
-func (d *DiscordAppBot) handleLinkHeadset(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, member *discordgo.Member, userID string, groupID string) error {
+// handleLinkHeadsetInteraction handles the interaction for linking a headset. (both command and modal)
+func (d *DiscordAppBot) handleLinkHeadsetInteraction(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, code string) error {
+	code = strings.TrimSpace(code)
+	code = strings.ToUpper(code)
 
-	options := i.ApplicationCommandData().Options
-	if len(options) == 0 {
-		return errors.New("no options provided")
-	}
-	linkCode := options[0].StringValue()
-
-	if user == nil {
-		return nil
-	}
-	member, err := s.GuildMember(i.GuildID, user.ID)
-	if err != nil {
-		logger.WithField("user_id", user.ID).Error("Failed to get guild member")
-	}
-
-	if err := d.linkHeadset(ctx, logger, member, linkCode); err != nil {
-		return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Flags:   discordgo.MessageFlagsEphemeral,
-				Content: err.Error(),
+	// Validate the link code as a 4 character string
+	var reason string
+	var embed *discordgo.MessageEmbed
+	if len(code) != 4 {
+		embed = &discordgo.MessageEmbed{
+			Title:       "Invalid Code",
+			Description: "The code must be exactly 4 characters long. (e.g. `ABCD`). Please try again.",
+			Color:       0xCC0000, // Red
+			Fields: []*discordgo.MessageEmbedField{
+				{
+					Name:   "Detailed Error",
+					Value:  fmt.Sprintf("```fix\n%s\n```", reason),
+					Inline: false,
+				},
 			},
-		})
+		}
+	} else {
+		if err := d.linkHeadset(ctx, d.db, logger, i.Member.User.ID, code); err != nil {
+			if err == ErrLinkNotFound {
+				embed = &discordgo.MessageEmbed{
+					Title:       "Linking Failed",
+					Description: "The link code is invalid or has expired. Please try again.",
+					Color:       0xCC0000, // Red
+					Fields: []*discordgo.MessageEmbedField{
+						{
+							Name:   "Detailed Error",
+							Value:  fmt.Sprintf("```fix\n%s\n```", reason),
+							Inline: false,
+						},
+					},
+				}
+			} else {
+				embed = &discordgo.MessageEmbed{
+					Title:       "Linking Failed",
+					Description: "An error occurred while linking your headset. Please try again later.",
+					Color:       0xCC0000, // Red
+					Fields: []*discordgo.MessageEmbedField{
+						{
+							Name:   "Detailed Error",
+							Value:  fmt.Sprintf("```fix\n%s\n```", err.Error()),
+							Inline: false,
+						},
+					},
+				}
+			}
+		} else {
+			embed = &discordgo.MessageEmbed{
+				Title:       "Headset Linked",
+				Description: "Your headset has been linked. Restart your game.",
+				Color:       0x00CC66, // Green
+			}
+		}
 	}
 
-	content := "Your headset has been linked. Restart your game."
+	d.cache.QueueSyncMember(i.GuildID, i.Member.User.ID, false)
 
-	d.cache.QueueSyncMember(i.GuildID, user.ID, true)
-
-	// Send the response
 	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Flags:   discordgo.MessageFlagsEphemeral,
-			Content: content,
+			Embeds: []*discordgo.MessageEmbed{
+				embed,
+			},
+			Flags: discordgo.MessageFlagsEphemeral,
 		},
 	})
+
 }
 
 func (d *DiscordAppBot) handleUnlinkHeadset(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, member *discordgo.Member, userID string, groupID string) error {
@@ -129,7 +152,7 @@ func (d *DiscordAppBot) handleUnlinkHeadset(ctx context.Context, logger runtime.
 
 		account, err := nk.AccountGetId(ctx, userID)
 		if err != nil {
-			logger.Error("Failed to get account", zap.Error(err))
+			logger.WithField("error", err).Error("Failed to get account")
 			return err
 		}
 		if len(account.Devices) == 0 {
@@ -144,19 +167,26 @@ func (d *DiscordAppBot) handleUnlinkHeadset(ctx context.Context, logger runtime.
 
 		loginHistory := NewLoginHistory(userID)
 		if err := StorageRead(ctx, nk, userID, loginHistory, true); err != nil {
-			logger.Error("Failed to load login history", zap.Error(err))
+			logger.WithField("error", err).Error("Failed to load login history")
 			return err
 		}
+		xpids := make([]string, 0, len(account.Devices))
+		for _, d := range account.Devices {
+			if xpidStr, ok := strings.CutPrefix(d.Id, DevicePrefixXPID); ok {
+				xpids = append(xpids, xpidStr)
+			}
+		}
 
-		options := make([]discordgo.SelectMenuOption, 0, len(account.Devices))
-		for _, device := range account.Devices {
+		options := make([]discordgo.SelectMenuOption, 0, len(xpids))
+		for _, xpid := range xpids {
 
 			description := ""
-			xpid, err := evr.ParseEvrId(device.GetId())
-			if err != nil {
+
+			v, _ := evr.ParseEvrId(xpid)
+			if v == nil {
 				continue
 			}
-			if ts, ok := loginHistory.GetXPI(*xpid); ok {
+			if ts, ok := loginHistory.GetXPI(*v); ok {
 				hours := int(time.Since(ts).Hours())
 				if hours < 1 {
 					minutes := int(time.Since(ts).Minutes())
@@ -173,8 +203,8 @@ func (d *DiscordAppBot) handleUnlinkHeadset(ctx context.Context, logger runtime.
 			}
 
 			options = append(options, discordgo.SelectMenuOption{
-				Label: device.GetId(),
-				Value: device.GetId(),
+				Label: xpid,
+				Value: xpid,
 				Emoji: &discordgo.ComponentEmoji{
 					Name: "🔗",
 				},
@@ -211,8 +241,11 @@ func (d *DiscordAppBot) handleUnlinkHeadset(ctx context.Context, logger runtime.
 	}
 
 	if err := func() error {
-
-		return nk.UnlinkDevice(ctx, userID, xpid)
+		xpid, err := evr.ParseEvrId(xpid)
+		if err != nil {
+			return fmt.Errorf("failed to parse XPID: %w", err)
+		}
+		return UnlinkXPID(ctx, RuntimeLoggerToZapLogger(logger), d.db, uuid.FromStringOrNil(userID), *xpid)
 
 	}(); err != nil {
 		return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{

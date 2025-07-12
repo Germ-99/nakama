@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand"
 	"net"
 	"regexp"
@@ -37,14 +38,17 @@ const (
 )
 
 type (
-	ctxGroupIDKey struct{}
+	ctxMemberKey     struct{}
+	ctxProfileKey    struct{}
+	ctxGuildGroupKey struct{}
 )
 
 type DiscordAppBot struct {
 	sync.Mutex
 
-	ctx    context.Context
-	logger runtime.Logger
+	ctx       context.Context
+	logger    runtime.Logger
+	zapLogger *zap.Logger
 
 	nk runtime.NakamaModule
 	db *sql.DB
@@ -71,14 +75,16 @@ type DiscordAppBot struct {
 	prepareMatchRateLimiters  *MapOf[string, *rate.Limiter]
 }
 
-func NewDiscordAppBot(ctx context.Context, logger runtime.Logger, nk runtime.NakamaModule, db *sql.DB, metrics Metrics, pipeline *Pipeline, config Config, discordCache *DiscordIntegrator, profileRegistry *ProfileCache, statusRegistry StatusRegistry, dg *discordgo.Session, ipInfoCache *IPInfoCache, guildGroupRegistry *GuildGroupRegistry) (*DiscordAppBot, error) {
+func NewDiscordAppBot(ctx context.Context, logger *zap.Logger, nk runtime.NakamaModule, db *sql.DB, metrics Metrics, pipeline *Pipeline, config Config, discordCache *DiscordIntegrator, profileRegistry *ProfileCache, statusRegistry StatusRegistry, dg *discordgo.Session, ipInfoCache *IPInfoCache, guildGroupRegistry *GuildGroupRegistry) (*DiscordAppBot, error) {
 
-	logger = logger.WithField("system", "discordAppBot")
-
+	logger = logger.With(zap.String("system", "discordAppBot"))
+	runtimeLogger := NewRuntimeGoLogger(logger)
 	appbot := DiscordAppBot{
 		ctx: ctx,
 
-		logger:   logger,
+		logger:    runtimeLogger,
+		zapLogger: logger,
+
 		nk:       nk,
 		db:       db,
 		pipeline: pipeline,
@@ -115,20 +121,20 @@ func NewDiscordAppBot(ctx context.Context, logger runtime.Logger, nk runtime.Nak
 	dg.AddHandlerOnce(func(s *discordgo.Session, m *discordgo.Ready) {
 
 		// Create a user for the bot based on it's discord profile
-		userID, _, _, err := nk.AuthenticateCustom(ctx, m.User.ID, s.State.User.Username, true)
+		botUserID, _, _, err := nk.AuthenticateCustom(ctx, m.User.ID, s.State.User.Username, true)
 		if err != nil {
-			logger.Error("Error creating discordbot user: %s", err)
+			runtimeLogger.WithField("error", err).Error("Error creating discordbot user")
 		}
 
 		// Update the global settings with the bots ID
 		settings := *ServiceSettings()
-		settings.DiscordBotUserID = userID
+		settings.DiscordBotUserID = botUserID
 		ServiceSettingsUpdate(&settings)
 		if err := ServiceSettingsSave(ctx, nk); err != nil {
-			logger.Error("Error saving global settings: %s", err)
+			runtimeLogger.WithField("error", err).Error("Error saving global settings")
 		}
 
-		appbot.userID = userID
+		appbot.userID = botUserID
 
 		displayName := dg.State.User.GlobalName
 		if displayName == "" {
@@ -136,14 +142,18 @@ func NewDiscordAppBot(ctx context.Context, logger runtime.Logger, nk runtime.Nak
 		}
 
 		if err := appbot.RegisterSlashCommands(); err != nil {
-			logger.Error("Failed to register slash commands: %w", err)
+			runtimeLogger.WithField("error", err).Error("Failed to register slash commands")
 		}
 
-		logger.Info("Bot `%s` ready in %d guilds", displayName, len(dg.State.Guilds))
+		runtimeLogger.WithFields(map[string]any{
+			"display_name": displayName,
+			"bot_user_id":  botUserID,
+			"guild_count":  len(dg.State.Guilds),
+		}).Debug("Discord App Bot is ready")
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.RateLimit) {
-		logger.WithField("rate_limit", m).Warn("Discord rate limit")
+		logger.With(zap.Any("rate_limit", m)).Warn("Discord rate limit")
 	})
 
 	// Update the status with the number of matches and players
@@ -165,7 +175,7 @@ func NewDiscordAppBot(ctx context.Context, logger runtime.Logger, nk runtime.Nak
 				maxSize := MatchLobbyMaxSize + 1
 				matches, err := nk.MatchList(ctx, 1000, true, "", &minSize, &maxSize, "*")
 				if err != nil {
-					logger.WithField("err", err).Warn("Error fetching matches.")
+					logger.With(zap.Error(err)).Warn("Error fetching matches.")
 					continue
 				}
 				playerCount := 0
@@ -177,7 +187,7 @@ func NewDiscordAppBot(ctx context.Context, logger runtime.Logger, nk runtime.Nak
 				}
 				statusMessage := fmt.Sprintf("%d players in %d matches", playerCount, matchCount)
 				if err := dg.UpdateGameStatus(0, "with "+statusMessage); err != nil {
-					logger.WithField("err", err).Warn("Failed to update status")
+					logger.With(zap.Error(err)).Warn("Failed to update status")
 					continue
 				}
 
@@ -198,7 +208,7 @@ func NewDiscordAppBot(ctx context.Context, logger runtime.Logger, nk runtime.Nak
 	return &appbot, nil
 }
 
-func (e *DiscordAppBot) discordGoLogger(msgL int, caller int, format string, a ...interface{}) {
+func (e *DiscordAppBot) discordGoLogger(msgL int, caller int, format string, a ...any) {
 
 	pc, file, line, _ := goruntime.Caller(caller)
 
@@ -209,7 +219,7 @@ func (e *DiscordAppBot) discordGoLogger(msgL int, caller int, format string, a .
 	fns := strings.Split(name, ".")
 	name = fns[len(fns)-1]
 
-	logger := e.logger.WithFields(map[string]interface{}{
+	logger := e.logger.WithFields(map[string]any{
 		"file": file,
 		"line": line,
 		"func": name,
@@ -235,6 +245,10 @@ func (e *DiscordAppBot) loadPrepareMatchRateLimiter(userID, groupID string) *rat
 	return limiter
 }
 
+const (
+	ApplicationCommandGameService = "game-service"
+)
+
 var (
 	partyGroupIDPattern = regexp.MustCompile("^[a-z0-9]+$")
 )
@@ -243,6 +257,7 @@ var (
 type DiscordAppCommand struct {
 	*discordgo.ApplicationCommand
 	handler DiscordCommandHandlerFn
+	aliases []string // Aliases for the command
 }
 
 func (d *DiscordAppBot) AppCommands() []*DiscordAppCommand {
@@ -260,7 +275,14 @@ func (d *DiscordAppBot) AppCommands() []*DiscordAppCommand {
 					},
 				},
 			},
-			handler: d.handleLinkHeadset,
+			handler: func(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, member *discordgo.Member, userID string, groupID string) error {
+				options := i.ApplicationCommandData().Options
+				if len(options) == 0 {
+					return errors.New("no options provided")
+				}
+				return d.handleLinkHeadsetInteraction(ctx, logger, s, i, options[0].StringValue())
+			},
+			aliases: []string{"link-headset"},
 		},
 		{
 			ApplicationCommand: &discordgo.ApplicationCommand{
@@ -1791,7 +1813,7 @@ func (d *DiscordAppBot) AppCommands() []*DiscordAppCommand {
 					if vrmlDiscordID != target.ID && !forceLink {
 						return fmt.Errorf("VRML player [%s](%s) is not linked to discord user %s", vrmlUser.UserName, playerURL, target.Mention())
 					}
-					if err := LinkVRMLAccount(ctx, d.db, d.nk, targetUserID, vrmlPlayer.User.UserID); err != nil {
+					if err := LinkVRMLAccount(ctx, d.nk, targetUserID, vrmlPlayer.User.UserID); err != nil {
 						if err, ok := err.(*AccountAlreadyLinkedError); ok {
 							ownerID := d.cache.UserIDToDiscordID(err.OwnerUserID)
 							return fmt.Errorf("VRML player [%s](%s) is already linked to <@%s>", vrmlUser.UserName, playerURL, ownerID)
@@ -2110,10 +2132,7 @@ func (d *DiscordAppBot) AppCommands() []*DiscordAppCommand {
 					}
 				}
 
-				data, err := metadata.MarshalToMap()
-				if err != nil {
-					return fmt.Errorf("error marshalling group data: %w", err)
-				}
+				data := metadata.MarshalMap()
 
 				if err := d.nk.GroupUpdate(ctx, groupID, SystemUserID, "", "", "", "", "", false, data, 1000000); err != nil {
 					return fmt.Errorf("error updating group: %w", err)
@@ -2899,7 +2918,6 @@ func (d *DiscordAppBot) UnregisterCommands(ctx context.Context, logger runtime.L
 type DiscordCommandHandlerFn func(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, member *discordgo.Member, userID string, groupID string) error
 
 func (d *DiscordAppBot) RegisterSlashCommands() error {
-	ctx := d.ctx
 
 	dg := d.dg
 
@@ -2907,280 +2925,284 @@ func (d *DiscordAppBot) RegisterSlashCommands() error {
 	commandHandlers := make(map[string]DiscordCommandHandlerFn, len(appCommands))
 	for _, cmd := range appCommands {
 		commandHandlers[cmd.Name] = cmd.handler
+
+		// Add aliases to the command handlers
+		if len(cmd.aliases) > 0 {
+			for _, alias := range cmd.aliases {
+				commandHandlers[alias] = cmd.handler
+			}
+		}
 	}
 
 	dg.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		user, _ := getScopedUserMember(i)
 
-		userID := d.cache.DiscordIDToUserID(user.ID)
-		groupID := d.cache.GuildIDToGroupID(i.GuildID)
-
-		ctx := context.WithValue(d.ctx, ctxUserIDKey{}, userID)
-		ctx = context.WithValue(ctx, ctxGroupIDKey{}, groupID)
-		ctx = context.WithValue(ctx, ctxUsernameKey{}, user.Username)
-
 		logger := d.logger.WithFields(map[string]any{
-			"discord_id": user.ID,
-			"username":   user.Username,
-			"guild_id":   i.GuildID,
-			"channel_id": i.ChannelID,
-			"user_id":    d.cache.DiscordIDToUserID(user.ID),
-			"group_id":   d.cache.GuildIDToGroupID(i.GuildID),
+			"discord_id":     user.ID,
+			"username":       user.Username,
+			"guild_id":       i.GuildID,
+			"channel_id":     i.ChannelID,
+			"interaction_id": i.ID,
 		})
 
-		switch i.Type {
+		if err := func() error {
 
-		case discordgo.InteractionApplicationCommand:
+			// Retrieve the player data
 
-			appCommandName := i.ApplicationCommandData().Name
-			logger = logger.WithFields(map[string]any{
-				"app_command": appCommandName,
-				"options":     i.ApplicationCommandData().Options,
-			})
+			var (
+				ctx        = d.ctx
+				err        error
+				userID     = SnowflakeToUUID(i.Member.User.ID)
+				groupID    = SnowflakeToUUID(i.GuildID)
+				profile    *EVRProfile
+				guildGroup *GuildGroup
+			)
 
-			logger.Info("Handling application command.")
-			if handler, ok := commandHandlers[appCommandName]; ok {
-				err := d.handleInteractionApplicationCommand(ctx, logger, s, i, appCommandName, handler)
-				if err != nil {
-					logger.WithField("err", err).Error("Failed to handle interaction")
-					if err := simpleInteractionResponse(s, i, err.Error()); err != nil {
-						return
+			if profile, err = EVRProfileLoad(d.ctx, d.nk, userID.String()); err != nil && !errors.Is(err, ErrAccountNotFound) {
+				// Try the legacy user ID mapping
+				userID = uuid.FromStringOrNil(d.cache.DiscordIDToUserID(i.Member.User.ID))
+				if userID != uuid.Nil {
+					// Try and load the profile again with the legacy user ID
+					if profile, err = EVRProfileLoad(d.ctx, d.nk, userID.String()); err != nil {
+						return fmt.Errorf("failed to load profile for user %s: %w", userID, err)
 					}
-				}
-			} else {
-				logger.Info("Unhandled command: %v", appCommandName)
-			}
-		case discordgo.InteractionMessageComponent:
-
-			customID := i.MessageComponentData().CustomID
-			commandName, value, _ := strings.Cut(customID, ":")
-
-			logger = logger.WithFields(map[string]any{
-				"custom_id": commandName,
-				"value":     value,
-			})
-
-			logger.Info("Handling interaction message component.")
-
-			err := d.handleInteractionMessageComponent(ctx, logger, s, i, commandName, value)
-			if err != nil {
-				logger.WithField("err", err).Error("Failed to handle interaction message component")
-				if err := simpleInteractionResponse(s, i, err.Error()); err != nil {
-					return
-				}
-			}
-		case discordgo.InteractionApplicationCommandAutocomplete:
-
-			data := i.ApplicationCommandData()
-
-			logger = logger.WithFields(map[string]any{
-				"app_command_autocomplete": data.Name,
-				"options":                  data.Options,
-				"data":                     data,
-			})
-
-			switch data.Name {
-			case "unlink-headset":
-				if userID == "" {
-					logger.Error("Failed to get user ID")
-					return
-				}
-
-				account, err := d.nk.AccountGetId(ctx, userID)
-				if err != nil {
-					logger.Error("Failed to get account", zap.Error(err))
-				}
-
-				devices := make([]string, 0, len(account.Devices))
-				for _, device := range account.Devices {
-					devices = append(devices, device.GetId())
-				}
-
-				if data.Options[0].StringValue() != "" {
-					// User is typing a custom device name
-					for i := 0; i < len(devices); i++ {
-						if !strings.Contains(strings.ToLower(devices[i]), strings.ToLower(data.Options[0].StringValue())) {
-							devices = slices.Delete(devices, i, i+1)
-							i--
-						}
-					}
-				}
-
-				choices := make([]*discordgo.ApplicationCommandOptionChoice, len(account.Devices))
-				for i, device := range account.Devices {
-					choices[i] = &discordgo.ApplicationCommandOptionChoice{
-						Name:  device.GetId(),
-						Value: device.GetId(),
-					}
-				}
-
-				if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-					Type: discordgo.InteractionApplicationCommandAutocompleteResult,
-					Data: &discordgo.InteractionResponseData{
-						Flags:   discordgo.MessageFlagsEphemeral,
-						Choices: choices, // This is basically the whole purpose of autocomplete interaction - return custom options to the user.
-					},
-				}); err != nil {
-					logger.Error("Failed to respond to interaction", zap.Error(err))
-				}
-
-			case "create":
-
-				partial := ""
-
-				for _, o := range data.Options {
-					if o.Name == "region" {
-
-						// Only response if the region is focused
-						if !o.Focused {
-							return
-						}
-
-						partial = o.StringValue()
-					}
-				}
-
-				var found bool
-				var err error
-				var choices []*discordgo.ApplicationCommandOptionChoice
-
-				if choices, found = d.choiceCache.Load(user.ID); !found {
-
-					groupID := d.cache.GuildIDToGroupID(i.GuildID)
-					if groupID == "" {
-						return
-					}
-
-					userID := d.cache.DiscordIDToUserID(user.ID)
-					if userID == "" {
-						return
-					}
-
-					choices, err = d.autocompleteRegions(ctx, logger, userID, groupID)
-					if err != nil {
-						logger.Error("Failed to get regions", zap.Error(err))
-						return
-					}
-					d.choiceCache.Store(user.ID, choices)
-
-					go func() {
-						<-time.After(20 * time.Second)
-						d.choiceCache.Delete(user.ID)
-					}()
-				}
-
-				partial = strings.ToLower(partial)
-				partialCode := anyascii.Transliterate(partial)
-				for i := 0; i < len(choices); i++ {
-					if !strings.Contains(strings.ToLower(choices[i].Name), partial) && !strings.Contains(strings.ToLower(choices[i].Name), partialCode) {
-						choices = append(choices[:i], choices[i+1:]...)
-						i--
-					}
-				}
-
-				if err := d.dg.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-					Type: discordgo.InteractionApplicationCommandAutocompleteResult,
-					Data: &discordgo.InteractionResponseData{
-						Flags:   discordgo.MessageFlagsEphemeral,
-						Choices: choices, // This is basically the whole purpose of autocomplete interaction - return custom options to the user.
-					},
-				}); err != nil {
-					logger.Error("Failed to respond to interaction", zap.Error(err))
 				}
 			}
 
-		case discordgo.InteractionModalSubmit:
-			customID := i.ModalSubmitData().CustomID
-			group, value, _ := strings.Cut(customID, ":")
-
-			switch group {
-			case "linkcode_modal":
-				data := i.ModalSubmitData()
-				member, err := d.dg.GuildMember(i.GuildID, i.Member.User.ID)
-				if err != nil {
-					logger.Error("Failed to get guild member", zap.Error(err))
-					return
-				}
-				code := data.Components[0].(*discordgo.ActionsRow).Components[0].(*discordgo.TextInput).Value
-				if err := d.linkHeadset(ctx, logger, member, code); err != nil {
-					s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-						Type: discordgo.InteractionResponseChannelMessageWithSource,
-						Data: &discordgo.InteractionResponseData{
-							Content: "❌ Invalid code! Reopen your game and double check your code.",
-							Flags:   discordgo.MessageFlagsEphemeral,
-						},
-					})
+			if guildGroup = d.guildGroupRegistry.Get(groupID.String()); guildGroup == nil {
+				// If the guild group is not found, try to get it from the cache
+				groupID = uuid.FromStringOrNil(d.cache.GuildIDToGroupID(i.GuildID))
+				if groupID != uuid.Nil {
+					// Try to get the guild group from the registry again
+					guildGroup = d.guildGroupRegistry.Get(groupID.String())
 				} else {
-					s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-						Type: discordgo.InteractionResponseChannelMessageWithSource,
-						Data: &discordgo.InteractionResponseData{
-							Content: "✅ Your are now linked. Restart your game.",
-							Flags:   discordgo.MessageFlagsEphemeral,
-						},
-					})
+					logger.Warn("Guild group not found in registry or cache")
+					return simpleInteractionResponse(s, i, "Guild group not found. Please try again later.")
 				}
-			case "igp":
-				if err := d.handleModalSubmit(logger, i, value); err != nil {
-					logger.Error("Failed to handle modal submit", zap.Error(err))
-					s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-						Type: discordgo.InteractionResponseChannelMessageWithSource,
-						Data: &discordgo.InteractionResponseData{
-							Content: "Failed to handle modal submit: %s" + err.Error(),
-							Flags:   discordgo.MessageFlagsEphemeral,
-						},
-					})
+			}
+
+			ctx = context.WithValue(ctx, ctxMemberKey{}, i.Member)
+			ctx = context.WithValue(ctx, ctxProfileKey{}, profile)
+			ctx = context.WithValue(ctx, ctxGuildGroupKey{}, guildGroup)
+
+			switch i.Type {
+
+			case discordgo.InteractionApplicationCommand:
+				appCommandName := i.ApplicationCommandData().Name
+				logger = logger.WithFields(map[string]any{
+					"app_command": appCommandName,
+					"options":     i.ApplicationCommandData().Options,
+					"uid":         userID.String(),
+					"gid":         groupID.String(),
+				})
+
+				if handler, ok := commandHandlers[appCommandName]; ok {
+					err := d.handleInteractionApplicationCommand(ctx, logger, s, i, appCommandName, handler)
+					if err != nil {
+						logger.WithField("err", err).Warn("Failed to handle interaction application command")
+						return simpleInteractionResponse(s, i, err.Error())
+					}
+					logger.Info("Handled application command")
+				} else {
+					logger.Warn("Unhandled command: %v", appCommandName)
+					return simpleInteractionResponse(s, i, fmt.Sprintf("Command not found: %s", appCommandName))
 				}
 
+			case discordgo.InteractionMessageComponent:
+				data := i.MessageComponentData()
+				logger = logger.WithFields(map[string]any{
+					"interaction_message_component": data.CustomID,
+					"data":                          i.MessageComponentData(),
+				})
+
+				err := d.handleInteractionMessageComponent(ctx, logger, s, i)
+				if err != nil {
+					logger.WithField("err", err).Warn("Failed to handle interaction message component")
+					return simpleInteractionResponse(s, i, err.Error())
+				}
+
+			case discordgo.InteractionApplicationCommandAutocomplete:
+				data := i.ApplicationCommandData()
+
+				logger = logger.WithFields(map[string]any{
+					"app_command_autocomplete": data.Name,
+					"options":                  data.Options,
+					"data":                     data,
+				})
+
+				switch data.Name {
+				case "unlink-headset":
+					if userID == uuid.Nil {
+						return simpleInteractionResponse(s, i, "Account not found.")
+					}
+					partial := strings.ToUpper(data.Options[0].StringValue())
+					var choices []*discordgo.ApplicationCommandOptionChoice
+					for _, id := range profile.account.Devices {
+						if strings.HasPrefix(id.Id, DevicePrefixXPID) && strings.Contains(id.Id, partial) {
+							choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
+								Name:  id.Id,
+								Value: id.Id,
+							})
+						}
+					}
+
+					return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+						Type: discordgo.InteractionApplicationCommandAutocompleteResult,
+						Data: &discordgo.InteractionResponseData{
+							Flags:   discordgo.MessageFlagsEphemeral,
+							Choices: choices, // This is basically the whole purpose of autocomplete interaction - return custom options to the user.
+						},
+					})
+
+				case "create":
+					partial := ""
+
+					for _, o := range data.Options {
+						if o.Name == "region" {
+							// Only respond if the region is focused
+							if !o.Focused {
+								return nil
+							}
+
+							partial = o.StringValue()
+						}
+					}
+
+					var found bool
+					var err error
+					var choices []*discordgo.ApplicationCommandOptionChoice
+
+					if choices, found = d.choiceCache.Load(user.ID); !found {
+
+						choices, err = d.autocompleteRegions(ctx, logger, userID.String(), groupID.String())
+						if err != nil {
+							logger.WithField("error", err).Warn("Failed to get regions")
+							return fmt.Errorf("failed to get regions: %w", err)
+						}
+						d.choiceCache.Store(user.ID, choices)
+
+						go func() {
+							<-time.After(20 * time.Second)
+							d.choiceCache.Delete(user.ID)
+						}()
+					}
+
+					partial = strings.ToLower(partial)
+					partialCode := anyascii.Transliterate(partial)
+					for i := len(choices); i > 0; i-- {
+						// Remove choices that do not match the partial input
+						if !strings.Contains(strings.ToLower(choices[i].Name), partial) && !strings.Contains(strings.ToLower(choices[i].Name), partialCode) {
+							choices = append(choices[:i-1], choices[i:]...)
+						}
+					}
+
+					if err := d.dg.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+						Type: discordgo.InteractionApplicationCommandAutocompleteResult,
+						Data: &discordgo.InteractionResponseData{
+							Flags:   discordgo.MessageFlagsEphemeral,
+							Choices: choices, // This is basically the whole purpose of autocomplete interaction - return custom options to the user.
+						},
+					}); err != nil {
+						logger.WithField("error", err).Error("Failed to respond to interaction")
+						return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+							Type: discordgo.InteractionResponseChannelMessageWithSource,
+							Data: &discordgo.InteractionResponseData{
+								Content: "Failed to respond to interaction: " + err.Error(),
+								Flags:   discordgo.MessageFlagsEphemeral,
+							},
+						})
+					}
+				}
+
+			case discordgo.InteractionModalSubmit:
+				customID := i.ModalSubmitData().CustomID
+				group, value, _ := strings.Cut(customID, ":")
+
+				switch group {
+
+				case "linkcode_modal":
+					data := i.ModalSubmitData()
+					code := data.Components[0].(*discordgo.ActionsRow).Components[0].(*discordgo.TextInput).Value
+					return d.handleLinkHeadsetInteraction(ctx, logger, s, i, code)
+
+				case "igp":
+					if err := d.handleModalSubmit(logger, i, value); err != nil {
+						return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+							Type: discordgo.InteractionResponseChannelMessageWithSource,
+							Data: &discordgo.InteractionResponseData{
+								Content: "Failed to handle modal submit: %s" + err.Error(),
+								Flags:   discordgo.MessageFlagsEphemeral,
+							},
+						})
+					}
+
+				default:
+					logger.Info("Unhandled modal submit: %v", i.ModalSubmitData().CustomID)
+					return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+						Type: discordgo.InteractionResponseChannelMessageWithSource,
+						Data: &discordgo.InteractionResponseData{
+							Content: "Unhandled modal submit: " + i.ModalSubmitData().CustomID,
+							Flags:   discordgo.MessageFlagsEphemeral,
+						},
+					})
+
+				}
 			default:
-				logger.Info("Unhandled modal submit: %v", i.ModalSubmitData().CustomID)
+				logger.Info("Unhandled interaction type: %v", i.Type)
 			}
-		default:
-			logger.Info("Unhandled interaction type: %v", i.Type)
+			return nil
+		}(); err != nil {
+			logger.WithField("error", err).Error("Failed to handle interaction")
+			if err := simpleInteractionResponse(s, i, err.Error()); err != nil {
+				logger.WithField("error", err).Error("Failed to respond to interaction")
+			}
+
 		}
 	})
 
-	d.logger.Info("Registering slash commands.")
 	// Register global guild commands
 	d.updateSlashCommands(dg, d.logger, "")
 	d.logger.Info("%d Slash commands registered/updated in %d guilds.", len(appCommands), len(dg.State.Guilds))
 
 	return nil
 }
+
 func (d *DiscordAppBot) updateSlashCommands(s *discordgo.Session, logger runtime.Logger, guildID string) {
 	// create a map of current commands
 	currentCommands := make(map[string]*discordgo.ApplicationCommand, 0)
-	mainSlashCommands := make([]*discordgo.ApplicationCommand, 0, len(appCommands))
-	for _, command := range appCommands {
-		mainSlashCommands = append(mainSlashCommands, command.ApplicationCommand)
+
+	for _, command := range d.AppCommands() {
 		currentCommands[command.Name] = command.ApplicationCommand
+		for _, alias := range command.aliases {
+			currentCommands[alias] = command.ApplicationCommand
+		}
 	}
 
-	// Get the bot's current global application commands
-	commands, err := s.ApplicationCommands(s.State.Application.ID, guildID)
-	if err != nil {
+	// Get the bot's current global application existingCommands
+	if existingCommands, err := s.ApplicationCommands(s.State.Application.ID, guildID); err != nil {
 		logger.WithField("err", err).Error("Failed to get application commands.")
 		return
-	}
-
-	for _, command := range commands {
-		if _, ok := currentCommands[command.Name]; !ok {
-			logger.Debug("Deleting %s command: %s", guildID, command.Name)
-			if err := s.ApplicationCommandDelete(s.State.Application.ID, guildID, command.ID); err != nil {
-				logger.WithField("err", err).Error("Failed to delete application command.")
+	} else {
+		// Remove existing commands that are not in the current commands
+		for _, command := range existingCommands {
+			if _, ok := currentCommands[command.Name]; !ok {
+				logger.Info("Deleting orphaned command: %s", command.Name)
+				// If the command is not in the current commands, delete it
+				if err := s.ApplicationCommandDelete(s.State.Application.ID, guildID, command.ID); err != nil {
+					logger.WithField("err", err).Error("Failed to delete application command.")
+				}
 			}
 		}
 	}
 
-	_, err = s.ApplicationCommandBulkOverwrite(s.State.Application.ID, guildID, mainSlashCommands)
-	if err != nil {
-		commandNames := make([]string, 0, len(mainSlashCommands))
-		for _, command := range mainSlashCommands {
-			commandNames = append(commandNames, command.Name)
-		}
+	// Bulk overwrite the application commands with the current commands
+	commands := slices.Collect(maps.Values(currentCommands))
+	if _, err := s.ApplicationCommandBulkOverwrite(s.State.Application.ID, guildID, commands); err != nil {
+		commandNames := maps.Keys(currentCommands)
 		logger.WithFields(map[string]any{
 			"guild_id":      guildID,
 			"command_names": commandNames,
-			"command_count": len(mainSlashCommands),
+			"command_count": len(currentCommands),
 			"error":         err,
 		}).Error("Failed to bulk overwrite application commands.")
 	}
@@ -3238,7 +3260,7 @@ func (d *DiscordAppBot) createRegionStatusEmbed(ctx context.Context, logger runt
 
 		state := &MatchLabel{}
 		if err := json.Unmarshal([]byte(match.GetLabel().GetValue()), state); err != nil {
-			logger.Error("Failed to unmarshal match label", zap.Error(err))
+			logger.WithField("error", err).Error("Failed to unmarshal match label")
 			continue
 		}
 
@@ -3272,7 +3294,7 @@ func (d *DiscordAppBot) createRegionStatusEmbed(ctx context.Context, logger runt
 				if state.SpawnedBy != "" {
 					spawnedBy, err = GetDiscordIDByUserID(ctx, d.db, state.SpawnedBy)
 					if err != nil {
-						logger.Error("Failed to get discord ID", zap.Error(err))
+						logger.WithField("error", err).Error("Failed to get discord ID")
 					}
 				}
 				status = fmt.Sprintf("Reserved by <@%s> <t:%d:R>", spawnedBy, state.StartTime.UTC().Unix())

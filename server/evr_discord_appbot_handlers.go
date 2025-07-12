@@ -152,12 +152,23 @@ func (d *DiscordAppBot) handleInteractionApplicationCommand(ctx context.Context,
 	return commandFn(ctx, logger, s, i, user, member, userID, groupID)
 }
 
-func (d *DiscordAppBot) handleInteractionMessageComponent(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, commandName, value string) error {
+func (d *DiscordAppBot) handleInteractionMessageComponent(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	nk := d.nk
+
+	customID := i.MessageComponentData().CustomID
+	commandName, subCommand, _ := strings.Cut(customID, ":")
+
+	logger = logger.WithFields(map[string]any{
+		"custom_id":   commandName,
+		"sub_command": subCommand,
+	})
 
 	userID := ctx.Value(ctxUserIDKey{}).(string)
 
 	switch commandName {
+	case "game-service":
+		return d.handleGameServiceCommand(ctx, logger, s, i, subCommand)
+
 	case "approve_ip":
 
 		history := &LoginHistory{}
@@ -165,8 +176,8 @@ func (d *DiscordAppBot) handleInteractionMessageComponent(ctx context.Context, l
 			return fmt.Errorf("failed to load login history: %w", err)
 		}
 
-		if value != "" {
-			ip := net.ParseIP(value)
+		if subCommand != "" {
+			ip := net.ParseIP(subCommand)
 			if ip == nil {
 				return simpleInteractionResponse(s, i, "Invalid IP address.")
 			}
@@ -229,11 +240,16 @@ func (d *DiscordAppBot) handleInteractionMessageComponent(ctx context.Context, l
 			return fmt.Errorf("message is nil")
 		}
 
+		embed := &discordgo.MessageEmbed{
+			Title:       "IP Address Approved",
+			Description: ":white_check_mark: Your IP address has been approved.\n\n## **Restart your game.**",
+			Color:       0x43b581, // Discord green
+		}
 		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
-				Flags:   discordgo.MessageFlagsEphemeral,
-				Content: ":white_check_mark: IP address approved.\n\n## **Restart your game.**",
+				Flags:  discordgo.MessageFlagsEphemeral,
+				Embeds: []*discordgo.MessageEmbed{embed},
 			},
 		}); err != nil {
 			return fmt.Errorf("failed to respond to interaction: %w", err)
@@ -292,31 +308,34 @@ func (d *DiscordAppBot) handleInteractionMessageComponent(ctx context.Context, l
 		if len(data.Values) == 0 {
 			return simpleInteractionResponse(s, i, "Invalid device ID.")
 		}
-		value = data.Values[0]
-		if value == "" {
-			return simpleInteractionResponse(s, i, "Invalid device ID.")
+		xpID, err := evr.ParseEvrId(data.Values[0])
+		if err != nil {
+			err := fmt.Errorf("failed to parse device ID: %w", err)
+			return simpleInteractionResponse(s, i, err.Error())
 		}
 
-		if err := nk.UnlinkDevice(ctx, userID, value); err != nil {
+		if err := UnlinkXPID(ctx, RuntimeLoggerToZapLogger(logger), d.db, uuid.FromStringOrNil(userID), *xpID); err != nil {
 			return fmt.Errorf("failed to unlink device ID: %w", err)
 		}
 
 		if err := d.cache.updateLinkStatus(ctx, i.Member.User.ID); err != nil {
 			return fmt.Errorf("failed to update link status: %w", err)
 		}
+		logger.WithFields(map[string]any{
+			"evrid": xpID,
+		}).Info("Unlinked device")
 
 		// Modify the interaction response
 		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
 				Flags:   discordgo.MessageFlagsEphemeral,
-				Content: fmt.Sprintf("Unlinked device ID `%s`.", value),
+				Content: fmt.Sprintf("Unlinked device ID `%s`.", xpID),
 			},
 		}); err != nil {
 			return fmt.Errorf("failed to respond to interaction: %w", err)
 		}
 	case "igp":
-
 		return d.handleInGamePanelInteraction(i, value)
 	case "suspend_player_select":
 		return d.handleSuspendPlayerSelect(ctx, logger, s, i, user, member, userID, groupID, value)
@@ -330,9 +349,6 @@ func (d *DiscordAppBot) handleInteractionMessageComponent(ctx context.Context, l
 		return d.handleSuspendPlayerAddNotes(ctx, logger, s, i, user, member, userID, groupID, value)
 	case "suspend_player_activate":
 		return d.handleSuspendPlayerActivate(ctx, logger, s, i, user, member, userID, groupID, value)
-
-	case "game-service":
-		return d.handleGameServiceCommand(ctx, logger, s, i, value)
 	}
 
 	return nil

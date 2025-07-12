@@ -140,7 +140,7 @@ func (p *EvrPipeline) loginRequestV2(ctx context.Context, logger *zap.Logger, se
 	if err := p.processLoginRequest(ctx, logger, session, &params); err != nil {
 
 		discordID := ""
-		if userID, err := GetUserIDByDeviceID(ctx, p.db, request.XPID.String()); err == nil {
+		if userID, _, err := AuthenticateXPID(ctx, logger, p.db, request.XPID); err == nil {
 			discordID = p.discordCache.UserIDToDiscordID(userID)
 		} else if !errors.Is(err, DeviceNotLinkedError{}) {
 			logger.Debug("Failed to get user ID by device ID", zap.Error(err))
@@ -217,7 +217,7 @@ func (p *EvrPipeline) loginRequestV1(ctx context.Context, logger *zap.Logger, se
 	if err := p.processLoginRequest(ctx, logger, session, &params); err != nil {
 
 		discordID := ""
-		if userID, err := GetUserIDByDeviceID(ctx, p.db, request.XPID.String()); err == nil {
+		if userID, err := GetUserIDByXPID(ctx, p.db, request.XPID); err == nil {
 			discordID = p.discordCache.UserIDToDiscordID(userID)
 		} else if !errors.Is(err, DeviceNotLinkedError{}) {
 			logger.Debug("Failed to get user ID by device ID", zap.Error(err))
@@ -377,34 +377,49 @@ func (p *EvrPipeline) authenticateSession(ctx context.Context, logger *zap.Logge
 	}
 
 	// Get the user for this device
-	params.profile, err = AccountGetDeviceID(ctx, p.db, p.nk, params.xpID.String())
+	params.profile, err = GetPlayerByXPID(ctx, p.db, p.nk, params.xpID)
 	switch status.Code(err) {
 	// The device is not linked to an account.
 	case codes.NotFound:
 
 		metricsTags["device_linked"] = "false"
 
-		// the session is authenticated. Automatically link the device.
 		if !session.userID.IsNil() {
-			if err := p.nk.LinkDevice(ctx, session.UserID().String(), params.xpID.String()); err != nil {
+			// the session is authenticated. Automatically link the device.
+			if err := LinkXPID(ctx, logger, p.db, session.userID, params.xpID); err != nil {
 				metricsTags["error"] = "failed_link_device"
 				return fmt.Errorf("failed to link device: %w", err)
 			}
 
-			// The session is not authenticated. Create a link ticket.
 		} else {
-
-			if linkTicket, err := p.linkTicket(ctx, params.xpID, session.clientIP, params.loginPayload); err != nil {
-
+			// The session is not authenticated. Create a link ticket.
+			linkTickets := &LinkTickets{}
+			if err := StorageRead(ctx, p.nk, SystemUserID, linkTickets, true); err != nil {
 				metricsTags["error"] = "link_ticket_error"
+				return fmt.Errorf("failed to read link tickets: %w", err)
+			}
 
-				return fmt.Errorf("error creating link ticket: %s", err)
-			} else {
-
-				return DeviceNotLinkedError{
-					code:        linkTicket.Code,
-					botUsername: p.appBot.dg.State.User.Username,
+			// Check if the XPID already exists in the link tickets
+			code := linkTickets.GetCodeByXPID(params.xpID)
+			if code == "" {
+				payload, err := json.Marshal(params.loginPayload)
+				if err != nil {
+					metricsTags["error"] = "failed_marshal_login_payload"
+					return fmt.Errorf("failed to marshal login payload: %w", err)
 				}
+				// Generate a new link ticket
+				code = linkTickets.GenerateCode(params.xpID, session.clientIP, string(payload))
+			}
+
+			// Store the link ticket
+			if err := StorageWrite(ctx, p.nk, SystemUserID, linkTickets); err != nil {
+				metricsTags["error"] = "link_ticket_error"
+				return fmt.Errorf("failed to store link tickets: %w", err)
+			}
+
+			return DeviceNotLinkedError{
+				code:        code,
+				botUsername: p.appBot.dg.State.User.Username,
 			}
 		}
 
@@ -414,39 +429,48 @@ func (p *EvrPipeline) authenticateSession(ctx context.Context, logger *zap.Logge
 		metricsTags["device_linked"] = "true"
 
 		var (
-			requiresPasswordAuth    = params.profile.HasPasswordSet()
+			requiresTokenAuth       = params.profile.TokenAuthRequired()
 			authenticatedViaSession = !session.userID.IsNil()
-			isAccountMismatched     = params.profile.ID() != session.userID.String()
-			passwordProvided        = params.authPassword != ""
 		)
-
-		if requiresPasswordAuth {
-
-			if !authenticatedViaSession {
+		if !authenticatedViaSession {
+			if requiresTokenAuth {
 				// The session authentication was not successful.
 				metricsTags["error"] = "session_auth_failed"
 				return errors.New("session authentication failed: account requires password authentication")
 			}
 		} else {
+			isAccountMismatched := params.profile.ID() != session.userID.String()
+			isPasswordProvided := params.authPassword != ""
 
-			if authenticatedViaSession && isAccountMismatched {
+			if isAccountMismatched {
 				// The device is linked to a different account.
 				metricsTags["error"] = "device_link_mismatch"
 				logger.Error("Device is linked to a different account.", zap.String("device_user_id", params.profile.ID()), zap.String("session_user_id", session.userID.String()))
 				return fmt.Errorf("device linked to a different account. (%s)", params.profile.Username())
 			}
 
-			if passwordProvided {
+			// Validate the token ID is in the device ids
+			if tokenID := ctx.Value(ctxTokenIDKey{}).(string); tokenID != "" {
+				userID, _, _, _, _, _, ok := parseToken([]byte(p.config.GetSession().EncryptionKey), tokenID)
+				if !ok {
+					return fmt.Errorf("invalid client token: %s", tokenID)
+				}
+				if userID.String() != params.profile.ID() {
+					// The token ID does not match the profile ID.
+					metricsTags["error"] = "token_id_mismatch"
+					logger.Error("Token ID does not match the profile ID.", zap.String("token_id", tokenID), zap.String("profile_id", params.profile.ID()))
+					return fmt.Errorf("token ID does not match the profile ID. (%s)", params.profile.Username())
+				}
+			}
+			if isPasswordProvided {
 				// This is the first time setting the password.
 				if err := LinkEmail(ctx, logger, p.db, uuid.FromStringOrNil(params.profile.ID()), params.profile.ID()+"@"+p.placeholderEmail, params.authPassword); err != nil {
 					metricsTags["error"] = "failed_link_email"
 					return fmt.Errorf("failed to link email: %w", err)
 				}
 			}
-
 		}
 	}
-
 	// Replace the session context with a derived one that includes the login session ID and the EVR ID
 	ctx = session.Context()
 	session.Lock()
