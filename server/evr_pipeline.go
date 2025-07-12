@@ -419,9 +419,9 @@ func (p *EvrPipeline) ProcessRequestEVR(logger *zap.Logger, session Session, in 
 
 	// Legacy Pipeline
 	switch in.(type) {
-	case *evr.LoginRequestV2:
+	case *evr.LoginRequestV1:
 		isAuthenticationRequired = false
-		pipelineFn = p.loginRequestV1
+		pipelineFn = p.loginRequestV2
 	}
 
 	if pipelineFn == nil {
