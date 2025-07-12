@@ -360,7 +360,8 @@ func (c *DiscordIntegrator) syncMember(ctx context.Context, logger *zap.Logger, 
 
 	group, ok := groups[groupID]
 	if !ok || group == nil {
-		if err := c.nk.GroupUsersAdd(ctx, SystemUserID, groupID, []string{profile.ID()}); err != nil {
+		// Add the player to the group
+		if err := c.nk.GroupUsersAdd(ctx, SystemUserID, groupID, []string{evrAccount.ID()}); err != nil {
 			return fmt.Errorf("error joining group: %w", err)
 		}
 
@@ -370,13 +371,13 @@ func (c *DiscordIntegrator) syncMember(ctx context.Context, logger *zap.Logger, 
 			return fmt.Errorf("error getting user guild groups: %w", err)
 		}
 		group, ok = groups[groupID]
-		if !ok || group == nil {
-			return errors.New("guild group not found")
+		if !ok {
+			return fmt.Errorf("guild group not found")
 		}
 	}
 
 	// Update the group state with the member's roles.
-	if group.RoleCacheUpdate(profile, member.Roles) {
+	if group.RoleCacheUpdate(evrAccount, member.Roles) {
 		if err := GuildGroupStore(ctx, c.nk, c.guildGroupRegistry, group); err != nil {
 			return fmt.Errorf("error storing guild group: %w", err)
 		}
@@ -599,6 +600,7 @@ func (d *DiscordIntegrator) handleGuildDelete(logger *zap.Logger, s *discordgo.S
 	if err := d.nk.GroupDelete(d.ctx, groupID); err != nil {
 		return fmt.Errorf("error deleting group: %w", err)
 	}
+	d.guildGroupRegistry.Remove(groupID)
 	d.Purge(e.Guild.ID)
 	return nil
 }

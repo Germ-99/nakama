@@ -79,68 +79,87 @@ func (g GuildGroup) MembershipBitSet(userID string) uint64 {
 }
 
 func (g GuildGroup) HasRole(userID, role string) bool {
-	g.State.RLock()
-	defer g.State.RUnlock()
+	g.State.mu.RLock()
+	defer g.State.mu.RUnlock()
 	return g.State.hasRole(userID, role)
 }
 
 func (g *GuildGroup) RoleCacheUpdate(account *EVRProfile, roles []string) bool {
-	g.State.Lock()
-	defer g.State.Unlock()
-	// Ensure the role cache has been initialized
-	if g.State.RoleCache == nil {
-		g.State.RoleCache = make(map[string]map[string]struct{})
-	}
+	g.State.mu.Lock()
+	defer g.State.mu.Unlock()
 
 	g.State.updated = false
+	accountID := account.ID()
 
-	roleSet := g.RoleMap.AsSet()
-	// Ignore irrelevant roles
-	for i := 0; i < len(roles); i++ {
-		if _, ok := roleSet[roles[i]]; !ok {
-			roles = slices.Delete(roles, i, i+1)
-			i--
+	// Initialize the role cache if it's nil.
+	if g.State.RoleCache == nil {
+		g.State.RoleCache = make(map[string]map[string]struct{})
+		g.State.updated = true // Initialization counts as an update
+	}
+
+	// Filter out roles that are not relevant to this guild group.
+	relevantRoles := make(map[string]struct{})
+	for _, role := range roles {
+		if _, ok := g.RoleMap.AsSet()[role]; ok {
+			relevantRoles[role] = struct{}{}
 		}
 	}
 
-	// Add the user to the roles
-	updatedRoles := make(map[string]struct{}, len(roleSet))
-	for _, r := range roles {
-		updatedRoles[r] = struct{}{}
-	}
+	// Iterate over all known roles in this guild group to update affiliations.
+	for _, roleID := range g.RoleMap.AsSlice() {
+		_, accountHasRole := relevantRoles[roleID]
+		userIDsInRole, cacheHasRole := g.State.RoleCache[roleID]
 
-	// Update the roles
-	for _, rID := range g.RoleMap.AsSlice() {
-		if _, ok := updatedRoles[rID]; ok {
-			if userIDs, ok := g.State.RoleCache[rID]; !ok {
-				g.State.RoleCache[rID] = map[string]struct{}{account.ID(): {}}
+		if accountHasRole {
+			// Account should have this role.
+			if !cacheHasRole {
+				// Role not in cache, add it and the account.
+				g.State.RoleCache[roleID] = map[string]struct{}{accountID: {}}
 				g.State.updated = true
-			} else {
-				if _, ok := userIDs[account.ID()]; !ok {
-					userIDs[account.ID()] = struct{}{}
+			} else if _, ok := userIDsInRole[accountID]; !ok {
+				// Role in cache, but account not associated, add account.
+				userIDsInRole[accountID] = struct{}{}
+				g.State.updated = true
+			}
+		} else {
+			// Account should not have this role.
+			if cacheHasRole {
+				if _, ok := userIDsInRole[accountID]; ok {
+					// Account is associated with role, but shouldn't be, remove.
+					delete(userIDsInRole, accountID)
 					g.State.updated = true
+					// If no more users in this role, consider cleaning up the role entry (optional).
+					if len(userIDsInRole) == 0 {
+						delete(g.State.RoleCache, roleID)
+					}
 				}
 			}
-		} else if userIDs, ok := g.State.RoleCache[rID]; ok {
-			if _, ok := userIDs[account.ID()]; ok {
-				delete(userIDs, account.ID())
-				g.State.updated = true
-			}
 		}
 	}
 
-	// If this user is suspended, add their devices to the suspension list
-	if g.State.hasRole(account.ID(), g.RoleMap.Suspended) {
+	g.updateSuspensionStatus(account, accountID)
+
+	return g.State.updated
+}
+
+// updateSuspensionStatus manages the suspension status of an account based on its roles.
+func (g *GuildGroup) updateSuspensionStatus(account *EVRProfile, accountID string) {
+	isSuspended := g.State.hasRole(accountID, g.RoleMap.Suspended)
+
+	if isSuspended {
+		// If the user is suspended, add their XPIDs to the suspension list.
 		if g.State.SuspendedXPIDs == nil {
 			g.State.SuspendedXPIDs = make(map[evr.EvrId]string)
+			g.State.updated = true // Initialization counts as an update
 		}
 		for _, xpid := range account.XPIDs() {
-			g.State.SuspendedXPIDs[xpid] = account.ID()
-			g.State.updated = true
+			if _, ok := g.State.SuspendedXPIDs[xpid]; !ok {
+				g.State.SuspendedXPIDs[xpid] = accountID
+				g.State.updated = true
+			}
 		}
 	} else {
-
-		// If this user is no longer suspended, remove their devices from the suspension list
+		// If the user is no longer suspended, remove their XPIDs from the suspension list.
 		if g.State.SuspendedXPIDs != nil {
 			for _, xpid := range account.XPIDs() {
 				if _, ok := g.State.SuspendedXPIDs[xpid]; ok {
@@ -150,8 +169,6 @@ func (g *GuildGroup) RoleCacheUpdate(account *EVRProfile, roles []string) bool {
 			}
 		}
 	}
-
-	return g.State.updated
 }
 
 func (g *GuildGroup) IsOwner(userID string) bool {
@@ -185,8 +202,8 @@ func (g *GuildGroup) IsMember(userID string) bool {
 }
 
 func (g *GuildGroup) IsSuspended(userID string, xpid *evr.EvrId) bool {
-	g.State.RLock()
-	defer g.State.RUnlock()
+	g.State.mu.RLock()
+	defer g.State.mu.RUnlock()
 
 	if g.State.hasRole(userID, g.RoleMap.Suspended) {
 		return true
@@ -229,8 +246,8 @@ func (g *GuildGroup) IsAllowedMatchmaking(userID string) bool {
 	if !g.MembersOnlyMatchmaking {
 		return true
 	}
-	g.State.RLock()
-	defer g.State.RUnlock()
+	g.State.mu.RLock()
+	defer g.State.mu.RUnlock()
 
 	if g.State.RoleCache == nil {
 		return false

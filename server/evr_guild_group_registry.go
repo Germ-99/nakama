@@ -164,3 +164,21 @@ func (r *GuildGroupRegistry) Add(gg *GuildGroup) {
 	newGuildGroups[gg.ID()] = gg
 	r.guildGroups.Store(&newGuildGroups)
 }
+
+func (r *GuildGroupRegistry) Remove(groupID string) {
+	gid := uuid.FromStringOrNil(groupID)
+	if gid == uuid.Nil {
+		// Return nil
+		return
+	}
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	// Rebuild the guild groups map
+	newGuildGroups := make(map[uuid.UUID]*GuildGroup, len(*r.guildGroups.Load())-1)
+	for id, group := range *r.guildGroups.Load() {
+		if id != gid {
+			newGuildGroups[id] = group
+		}
+	}
+	r.guildGroups.Store(&newGuildGroups)
+}
