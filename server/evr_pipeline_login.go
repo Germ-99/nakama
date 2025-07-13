@@ -390,6 +390,11 @@ func (p *EvrPipeline) authenticateSession(ctx context.Context, logger *zap.Logge
 				metricsTags["error"] = "failed_link_device"
 				return fmt.Errorf("failed to link device: %w", err)
 			}
+			params.profile, err = GetPlayerByXPID(ctx, p.db, p.nk, params.xpID)
+			if err != nil {
+				metricsTags["error"] = "failed_get_linked_profile"
+				return fmt.Errorf("failed to get linked profile: %w", err)
+			}
 
 		} else {
 			// The session is not authenticated. Create a link ticket.
