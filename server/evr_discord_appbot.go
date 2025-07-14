@@ -306,37 +306,7 @@ func (d *DiscordAppBot) AppCommands() []*DiscordAppCommand {
 				},
 			},
 			handler: d.handleUnlinkHeadset,
-		},
-		{
-			ApplicationCommand: &discordgo.ApplicationCommand{
-				Name:        "link-headset",
-				Description: "Link your headset device to your discord account.",
-				Options: []*discordgo.ApplicationCommandOption{
-					{
-						Type:        discordgo.ApplicationCommandOptionString,
-						Name:        "link-code",
-						Description: "Your four character link code.",
-						Required:    true,
-					},
-				},
-			},
-			handler: d.handleLinkHeadset,
-		},
-		{
-			ApplicationCommand: &discordgo.ApplicationCommand{
-				Name:        "unlink-headset",
-				Description: "Unlink a headset from your discord account.",
-				Options: []*discordgo.ApplicationCommandOption{
-					{
-						Type:         discordgo.ApplicationCommandOptionString,
-						Name:         "device-link",
-						Description:  "device link from /whoami",
-						Required:     false,
-						Autocomplete: true,
-					},
-				},
-			},
-			handler: d.handleUnlinkHeadset,
+			aliases: []string{"unlink-headset"},
 		},
 		{
 			ApplicationCommand: &discordgo.ApplicationCommand{
@@ -672,7 +642,52 @@ func (d *DiscordAppBot) AppCommands() []*DiscordAppCommand {
 				Name:        "whoami",
 				Description: "Receive your account information (privately).",
 			},
-			handler: d.handleWhoami,
+			handler: func(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, member *discordgo.Member, userID string, groupID string) error {
+
+				if user == nil {
+					return nil
+				}
+				if member == nil {
+					return errors.New("this command must be used from a guild")
+				}
+				// check for the with-detail boolean option
+				d.cache.Purge(user.ID)
+				d.cache.QueueSyncMember(i.GuildID, user.ID, true)
+
+				// Default options
+
+				opts := UserProfileRequestOptions{
+					IncludeSuspensionsEmbed:      true,
+					IncludePastSuspensions:       false,
+					IncludeCurrentMatchesEmbed:   true,
+					IncludeVRMLHistoryEmbed:      true,
+					IncludePastDisplayNamesEmbed: false,
+					IncludeAlternatesEmbed:       false,
+
+					IncludeDiscordDisplayName:      true,
+					IncludeSuspensionAuditorNotes:  false,
+					IncludeInactiveSuspensions:     false,
+					ErrorIfAccountDisabled:         true,
+					IncludePartyGroupName:          true,
+					IncludeDefaultMatchmakingGuild: true,
+					IncludeLinkedDevices:           true,
+					StripIPAddresses:               false,
+					IncludeRecentLogins:            true,
+					IncludePasswordSetState:        true,
+					IncludeGuildRoles:              true,
+					IncludeAllGuilds:               true,
+					ShowLoginsSince:                time.Now().Add(-30 * 24 * time.Hour),
+					SendFileOnError:                false,
+				}
+				err := d.handleProfileRequest(ctx, logger, d.nk, s, i, user, opts)
+				logger.WithFields(map[string]any{
+					"discord_id":       user.ID,
+					"discord_username": user.Username,
+					"error":            err,
+				}).Debug("whoami")
+				return err
+
+			},
 		},
 		{
 			ApplicationCommand: &discordgo.ApplicationCommand{
