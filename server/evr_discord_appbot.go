@@ -260,6 +260,13 @@ func (d *DiscordAppBot) AppCommands() []*DiscordAppCommand {
 		},
 		{
 			ApplicationCommand: &discordgo.ApplicationCommand{
+				Name:        "suspend",
+				Description: "Suspend a player from the guild.",
+			},
+			handler: d.handleSuspend,
+		},
+		{
+			ApplicationCommand: &discordgo.ApplicationCommand{
 				Name:        "unlink",
 				Description: "Unlink a headset from your discord account.",
 				Options: []*discordgo.ApplicationCommandOption{
@@ -1513,7 +1520,7 @@ func (d *DiscordAppBot) AppCommands() []*DiscordAppCommand {
 					}
 				}
 
-				return d.kickPlayer(logger, i, callerMember, target, duration, userNotice, notes, requireCommunityValues)
+				return d.kickPlayer(logger, i, callerMember, target, duration, userNotice, notes, requireCommunityValues, false)
 			},
 		},
 		{
@@ -2201,6 +2208,17 @@ func (d *DiscordAppBot) AppCommands() []*DiscordAppCommand {
 					return fmt.Errorf("invalid mode `%s`", mode)
 				} else if level != evr.LevelUnspecified && !slices.Contains(levels, level) {
 					return fmt.Errorf("invalid level `%s`", level)
+				}
+
+				// Check if the user has a suspension that allows private lobby access
+				suspensions, err := CheckEnforcementSuspensions(ctx, d.nk, d.guildGroupRegistry, userID, nil)
+				if err != nil {
+					return fmt.Errorf("failed to check enforcement suspensions: %w", err)
+				}
+				if s, ok := suspensions[groupID][userID]; ok && s.AllowPrivateLobbyAccess {
+					if mode == evr.ModeArenaPublic || mode == evr.ModeCombatPublic {
+						return errors.New("you are suspended from creating public matches")
+					}
 				}
 
 				startTime := time.Now()

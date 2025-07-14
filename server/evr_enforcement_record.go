@@ -13,6 +13,7 @@ type GuildEnforcementRecord struct {
 	UserNoticeText          string    `json:"suspension_notice"`
 	SuspensionExpiry        time.Time `json:"suspension_expiry"`
 	CommunityValuesRequired bool      `json:"community_values_required"`
+	AllowPrivateLobbyAccess bool      `json:"allow_private_lobby_access"`
 	AuditorNotes            string    `json:"notes"`
 }
 
