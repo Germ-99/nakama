@@ -336,19 +336,23 @@ func (d *DiscordAppBot) handleInteractionMessageComponent(ctx context.Context, l
 			return fmt.Errorf("failed to respond to interaction: %w", err)
 		}
 	case "igp":
-		return d.handleInGamePanelInteraction(i, value)
+		data := i.Interaction.MessageComponentData()
+		if len(data.Values) == 0 {
+			return simpleInteractionResponse(s, i, "Invalid device ID.")
+		}
+		return d.handleInGamePanelInteraction(i, data.Values[0])
 	case "suspend_player_select":
-		return d.handleSuspendPlayerSelect(ctx, logger, s, i, user, member, userID, groupID, value)
+		return d.handleSuspendPlayerSelect(ctx, logger, s, i, subCommand)
 	case "suspend_player_lookup":
-		return d.handleSuspendPlayerLookup(ctx, logger, s, i, user, member, userID, groupID, value)
+		return d.handleSuspendPlayerLookup(ctx, logger, s, i, subCommand)
 	case "suspend_player_confirm":
-		return d.handleSuspendPlayerConfirm(ctx, logger, s, i, user, member, userID, groupID, value)
+		return d.handleSuspendPlayerConfirm(ctx, logger, s, i, subCommand)
 	case "suspend_player_temp_ban":
-		return d.handleSuspendPlayerTempBan(ctx, logger, s, i, user, member, userID, groupID, value)
+		return d.handleSuspendPlayerTempBan(ctx, logger, s, i, subCommand)
 	case "suspend_player_add_notes":
-		return d.handleSuspendPlayerAddNotes(ctx, logger, s, i, user, member, userID, groupID, value)
+		return d.handleSuspendPlayerAddNotes(ctx, logger, s, i, subCommand)
 	case "suspend_player_activate":
-		return d.handleSuspendPlayerActivate(ctx, logger, s, i, user, member, userID, groupID, value)
+		return d.handleSuspendPlayerActivate(ctx, logger, s, i, subCommand)
 	}
 
 	return nil

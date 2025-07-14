@@ -3024,11 +3024,8 @@ func (d *DiscordAppBot) RegisterSlashCommands() error {
 				}
 
 			case discordgo.InteractionMessageComponent:
-				data := i.MessageComponentData()
-				logger = logger.WithFields(map[string]any{
-					"interaction_message_component": data.CustomID,
-					"data":                          i.MessageComponentData(),
-				})
+
+				logger.Info("Handling interaction message component.")
 
 				err := d.handleInteractionMessageComponent(ctx, logger, s, i)
 				if err != nil {

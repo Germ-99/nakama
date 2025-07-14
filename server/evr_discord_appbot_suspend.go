@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/heroiclabs/nakama-common/runtime"
@@ -21,7 +22,8 @@ func (d *DiscordAppBot) handleSuspend(ctx context.Context, logger runtime.Logger
 			Components: []discordgo.MessageComponent{
 				discordgo.ActionsRow{
 					Components: []discordgo.MessageComponent{
-						discordgo.UserSelect{
+						discordgo.SelectMenu{
+							MenuType:    discordgo.UserSelectMenu,
 							CustomID:    "suspend_player_select",
 							Placeholder: "Select a player",
 						},
@@ -47,7 +49,7 @@ func (d *DiscordAppBot) handleSuspend(ctx context.Context, logger runtime.Logger
 	})
 }
 
-func (d *DiscordAppBot) handleSuspendPlayerSelect(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, member *discordgo.Member, userID string, groupID string, targetUserID string) error {
+func (d *DiscordAppBot) handleSuspendPlayerSelect(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, targetUserID string) error {
 	targetUser, err := s.User(targetUserID)
 	if err != nil {
 		return err
@@ -86,7 +88,7 @@ func (d *DiscordAppBot) handleSuspendPlayerSelect(ctx context.Context, logger ru
 	})
 }
 
-func (d *DiscordAppBot) handleSuspendPlayerLookup(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, member *discordgo.Member, userID string, groupID string, targetUserID string) error {
+func (d *DiscordAppBot) handleSuspendPlayerLookup(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, targetUserID string) error {
 	target, err := s.User(targetUserID)
 	if err != nil {
 		return err
@@ -102,7 +104,7 @@ func (d *DiscordAppBot) handleSuspendPlayerLookup(ctx context.Context, logger ru
 	return d.handleProfileRequest(ctx, logger, d.nk, s, i, target, opts)
 }
 
-func (d *DiscordAppBot) handleSuspendPlayerConfirm(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, member *discordgo.Member, userID string, groupID string, targetUserID string) error {
+func (d *DiscordAppBot) handleSuspendPlayerConfirm(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, targetUserID string) error {
 	targetUser, err := s.User(targetUserID)
 	if err != nil {
 		return err
@@ -111,6 +113,11 @@ func (d *DiscordAppBot) handleSuspendPlayerConfirm(ctx context.Context, logger r
 	profile, err := EVRProfileLoad(ctx, d.nk, d.cache.DiscordIDToUserID(targetUserID))
 	if err != nil {
 		return err
+	}
+
+	guildGroup, ok := ctx.Value(ctxGuildGroupKey{}).(*GuildGroup)
+	if !ok {
+		return errors.New("failed to retrieve guild group from context")
 	}
 
 	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -127,7 +134,7 @@ func (d *DiscordAppBot) handleSuspendPlayerConfirm(ctx context.Context, logger r
 					Fields: []*discordgo.MessageEmbedField{
 						{
 							Name:  "IGN",
-							Value: profile.DisplayName,
+							Value: profile.GetGroupDisplayNameOrDefault(guildGroup.IDStr()),
 						},
 					},
 				},
@@ -210,15 +217,19 @@ func (d *DiscordAppBot) handleSuspendPlayerConfirm(ctx context.Context, logger r
 	})
 }
 
-func (d *DiscordAppBot) handleSuspendPlayerTempBan(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, member *discordgo.Member, userID string, groupID string, targetUserID string) error {
+func (d *DiscordAppBot) handleSuspendPlayerTempBan(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, targetUserID string) error {
 	targetUser, err := s.User(targetUserID)
 	if err != nil {
 		return err
 	}
+	member, ok := ctx.Value(ctxMemberKey{}).(*discordgo.Member)
+	if !ok {
+		return errors.New("failed to retrieve member from context")
+	}
 	return d.kickPlayer(logger, i, member, targetUser, "5m", "Temporary suspension.", "Temporary suspension triggered from /suspend command.", false, false)
 }
 
-func (d *DiscordAppBot) handleSuspendPlayerAddNotes(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, member *discordgo.Member, userID string, groupID string, targetUserID string) error {
+func (d *DiscordAppBot) handleSuspendPlayerAddNotes(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, targetUserID string) error {
 	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseModal,
 		Data: &discordgo.InteractionResponseData{
@@ -241,7 +252,7 @@ func (d *DiscordAppBot) handleSuspendPlayerAddNotes(ctx context.Context, logger 
 	})
 }
 
-func (d *DiscordAppBot) handleSuspendPlayerActivate(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, member *discordgo.Member, userID string, groupID string, targetUserID string) error {
+func (d *DiscordAppBot) handleSuspendPlayerActivate(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, targetUserID string) error {
 	data := i.MessageComponentData()
 
 	duration := data.Values[0]
@@ -258,6 +269,7 @@ func (d *DiscordAppBot) handleSuspendPlayerActivate(ctx context.Context, logger 
 	if err != nil {
 		return err
 	}
+	member := ctx.Value(ctxMemberKey{}).(*discordgo.Member)
 
 	err = d.kickPlayer(logger, i, member, targetUser, duration, message, notes, false, allowPrivateLobbyAccess)
 	if err != nil {
