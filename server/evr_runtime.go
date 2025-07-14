@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -36,7 +37,6 @@ const (
 	GroupGlobalBots              = "Global Bots"
 	GroupGlobalBadgeAdmins       = "Global Badge Admins"
 	GroupGlobalPrivateDataAccess = "Global Private Data Access"
-	GroupGlobalRequire2FA        = "Global Require 2FA"
 	SystemGroupLangTag           = "system"
 	GuildGroupLangTag            = "guild"
 )
@@ -199,9 +199,9 @@ func connectRedis(ctx context.Context, redisURL string) (*redis.Client, error) {
 
 func createCoreGroups(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, initializer runtime.Initializer) error {
 	// Create user for use by the discord bot (and core group ownership)
-	userId, _, _, err := nk.AuthenticateDevice(ctx, SystemUserID, "discordbot", true)
+	userId, _, _, err := nk.AuthenticateDevice(ctx, SystemUserID, "daemon", true)
 	if err != nil {
-		logger.WithField("err", err).Error("Error creating discordbot user: %v", err)
+		logger.WithField("err", err).Error("Error creating daemon user: %v", err)
 	}
 
 	coreGroups := []string{
@@ -211,30 +211,40 @@ func createCoreGroups(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 		GroupGlobalBadgeAdmins,
 		GroupGlobalBots,
 		GroupGlobalPrivateDataAccess,
-		GroupGlobalRequire2FA,
 	}
 
-	for _, name := range coreGroups {
-		// Search for group first
-		groups, _, err := nk.GroupsList(ctx, name, "", nil, nil, 1, "")
+	var cursor string
+
+	for {
+		groups, nextCursor, err := nk.GroupsList(ctx, "", SystemGroupLangTag, nil, nil, 100, cursor)
 		if err != nil {
-			logger.WithField("err", err).Error("Group list error: %v", err)
+			return fmt.Errorf("error listing groups: %w", err)
 		}
-		// remove groups that are not lang tag of 'system'
-		for i, group := range groups {
-			if group.LangTag != SystemGroupLangTag {
-				groups = append(groups[:i], groups[i+1:]...)
+
+		for _, g := range groups {
+			if idx := slices.Index(coreGroups, g.GetName()); idx != -1 {
+				// Remove the group from the list to avoid trying to create it
+				coreGroups = slices.Delete(coreGroups, idx, idx+1)
 			}
 		}
 
-		if len(groups) == 0 {
-			// Create a nakama core group
-			_, err = nk.GroupCreate(ctx, userId, name, userId, SystemGroupLangTag, name, "", false, map[string]interface{}{}, 1000)
-			if err != nil {
-				logger.WithField("err", err).Warn("Group `%s` create error: %v", name, err)
-			}
+		if nextCursor == "" {
+			break
+		}
+		cursor = nextCursor
+	}
+
+	// Create the core groups that do not exist
+	for _, name := range coreGroups {
+		_, err = nk.GroupCreate(ctx, userId, name, userId, SystemGroupLangTag, name, "System group", false, map[string]interface{}{}, 1000)
+		if err != nil {
+			logger.WithField("err", err).Warn("Group `%s` create error", name)
 		}
 	}
+
+	logger.WithFields(map[string]any{
+		"groups": coreGroups,
+	}).Info("Created core groups")
 
 	return nil
 }
