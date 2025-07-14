@@ -134,7 +134,7 @@ func (p *EvrPipeline) loginRequestV2(ctx context.Context, logger *zap.Logger, se
 	params.xpID = request.XPID
 	params.loginPayload = &request.Payload
 
-	logger = logger.With(zap.String("xpid", request.XPID.String()))
+	logger = logger.With(zap.String("evrid", request.XPID.String()))
 
 	// Process the login request and populate the session parameters.
 	if err := p.processLoginRequest(ctx, logger, session, &params); err != nil {
@@ -211,7 +211,7 @@ func (p *EvrPipeline) loginRequestV1(ctx context.Context, logger *zap.Logger, se
 		HMDSerialNumber: request.Payload.HMDSerialNumber,
 	}
 
-	logger = logger.With(zap.String("xpid", request.XPID.String()))
+	logger = logger.With(zap.String("evrid", request.XPID.String()))
 
 	// Process the login request and populate the session parameters.
 	if err := p.processLoginRequest(ctx, logger, session, &params); err != nil {
@@ -517,7 +517,7 @@ func (p *EvrPipeline) authorizeSession(ctx context.Context, logger *zap.Logger, 
 		p.nk.MetricsCounterAdd("login_attempt_banned_account", nil, 1)
 
 		logger.Info("Attempted login to banned account.",
-			zap.String("xpid", params.xpID.Token()),
+			zap.String("evrid", params.xpID.Token()),
 			zap.String("client_ip", session.clientIP),
 			zap.String("uid", params.profile.ID()),
 			zap.Any("login_payload", params.loginPayload))
@@ -537,7 +537,7 @@ func (p *EvrPipeline) authorizeSession(ctx context.Context, logger *zap.Logger, 
 	} else if len(userIDs) > 0 {
 		// The IP is on the deny list.
 		logger.Info("Attempted login with IP address that is on the deny list.",
-			zap.String("xpid", params.xpID.Token()),
+			zap.String("evrid", params.xpID.Token()),
 			zap.String("client_ip", session.clientIP),
 			zap.String("uid", params.profile.ID()),
 			zap.Any("denied_ip_owner", userIDs),
