@@ -266,56 +266,70 @@ func (p *EvrPipeline) lobbyAuthorize(ctx context.Context, logger *zap.Logger, se
 		}
 
 		if suspendedUserID != "" {
-			if suspendedUserID == userID {
-				// User is suspended from the group.
-				metricsTags["error"] = "suspended_user"
+			if suspensionRecord.AllowPrivateLobbyAccess {
+				// This is a limited access user.
+				// Treat them as if they have limited access.
+				switch lobbyParams.Mode {
+				case evr.ModeArenaPublic, evr.ModeCombatPublic, evr.ModeSocialPublic:
+					metricsTags["error"] = "limited_access_user"
 
-				// User has an active suspension
-				metricsTags["error"] = "suspended_user"
-				if _, err := p.appBot.LogAuditMessage(ctx, groupID, fmt.Sprintf("Rejected suspended user <@!%s> (%s) (%s) (expires <t:%d:R>)", lobbyParams.DiscordID, lobbyParams.DisplayName, suspensionRecord.UserNoticeText, suspensionRecord.SuspensionExpiry.Unix()), false); err != nil {
-					p.logger.Warn("Failed to send audit message", zap.String("channel_id", gg.AuditChannelID), zap.Error(err))
+					if _, err := p.appBot.LogAuditMessage(ctx, groupID, fmt.Sprintf("Rejected limited access user <@%s>", userID), true); err != nil {
+						p.logger.Warn("Failed to send audit message", zap.String("channel_id", gg.AuditChannelID), zap.Error(err))
+					}
+					return NewLobbyError(KickedFromLobbyGroup, "user does not have access social lobbies or matchmaking.")
 				}
-				const maxMessageLength = 60
-				message := suspensionRecord.UserNoticeText
-				expires := fmt.Sprintf(" [exp: %s]", FormatDuration(time.Until(suspensionRecord.SuspensionExpiry)))
-
-				if len(message)+len(expires) > maxMessageLength {
-					message = message[:maxMessageLength-len(expires)-3] + "..."
-				}
-				message = message + expires
-				return NewLobbyError(KickedFromLobbyGroup, message)
 			} else {
-				// This is an alternate account of a suspended user.
-				metricsTags["error"] = "suspended_alternate"
-				author := discordgo.MessageEmbedAuthor{
-					Name:    fmt.Sprintf("%s (%s)", lobbyParams.DisplayName, session.Username()),
-					IconURL: params.profile.AvatarURL(),
-				}
+				// This is a full suspension.
+				if suspendedUserID == userID {
+					// User is suspended from the group.
+					metricsTags["error"] = "suspended_user"
 
-				if member, err := p.discordCache.GuildMember(gg.GuildID, params.DiscordID()); err != nil {
-					logger.Warn("Error getting guild member", zap.Error(err))
+					// User has an active suspension
+					metricsTags["error"] = "suspended_user"
+					if _, err := p.appBot.LogAuditMessage(ctx, groupID, fmt.Sprintf("Rejected suspended user <@!%s> (%s) (%s) (expires <t:%d:R>)", lobbyParams.DiscordID, lobbyParams.DisplayName, suspensionRecord.UserNoticeText, suspensionRecord.SuspensionExpiry.Unix()), false); err != nil {
+						p.logger.Warn("Failed to send audit message", zap.String("channel_id", gg.AuditChannelID), zap.Error(err))
+					}
+					const maxMessageLength = 60
+					message := suspensionRecord.UserNoticeText
+					expires := fmt.Sprintf(" [exp: %s]", FormatDuration(time.Until(suspensionRecord.SuspensionExpiry)))
+
+					if len(message)+len(expires) > maxMessageLength {
+						message = message[:maxMessageLength-len(expires)-3] + "..."
+					}
+					message = message + expires
+					return NewLobbyError(KickedFromLobbyGroup, message)
 				} else {
-					author.IconURL = member.User.AvatarURL("")
-				}
-				otherDiscordID := p.discordCache.UserIDToDiscordID(suspendedUserID)
-				if _, err := p.appBot.LogAuditMessage(ctx, groupID, fmt.Sprintf("Rejected alt (<@!%s> (%s)) of suspended user <@!%s> (%s): `%s` (expires <t:%d:R>)", lobbyParams.DiscordID, lobbyParams.DisplayName, suspendedUserID, otherDiscordID, suspensionRecord.UserNoticeText, suspensionRecord.SuspensionExpiry.Unix()), false); err != nil {
-					p.logger.Warn("Failed to send audit message", zap.String("channel_id", gg.AuditChannelID), zap.Error(err))
-				}
-				const maxMessageLength = 60
-				message := suspensionRecord.UserNoticeText
-				expires := fmt.Sprintf(" [exp: %s]", FormatDuration(time.Until(suspensionRecord.SuspensionExpiry)))
+					// This is an alternate account of a suspended user.
+					metricsTags["error"] = "suspended_alternate"
+					author := discordgo.MessageEmbedAuthor{
+						Name:    fmt.Sprintf("%s (%s)", lobbyParams.DisplayName, session.Username()),
+						IconURL: params.profile.AvatarURL(),
+					}
 
-				if len(message)+len(expires) > maxMessageLength {
-					message = message[:maxMessageLength-len(expires)-3] + "..."
+					if member, err := p.discordCache.GuildMember(gg.GuildID, params.DiscordID()); err != nil {
+						logger.Warn("Error getting guild member", zap.Error(err))
+					} else {
+						author.IconURL = member.User.AvatarURL("")
+					}
+					otherDiscordID := p.discordCache.UserIDToDiscordID(suspendedUserID)
+					if _, err := p.appBot.LogAuditMessage(ctx, groupID, fmt.Sprintf("Rejected alt (<@!%s> (%s)) of suspended user <@!%s> (%s): `%s` (expires <t:%d:R>)", lobbyParams.DiscordID, lobbyParams.DisplayName, suspendedUserID, otherDiscordID, suspensionRecord.UserNoticeText, suspensionRecord.SuspensionExpiry.Unix()), false); err != nil {
+						p.logger.Warn("Failed to send audit message", zap.String("channel_id", gg.AuditChannelID), zap.Error(err))
+					}
+					const maxMessageLength = 60
+					message := suspensionRecord.UserNoticeText
+					expires := fmt.Sprintf(" [exp: %s]", FormatDuration(time.Until(suspensionRecord.SuspensionExpiry)))
+
+					if len(message)+len(expires) > maxMessageLength {
+						message = message[:maxMessageLength-len(expires)-3] + "..."
+					}
+					message = message + expires
+					return NewLobbyError(KickedFromLobbyGroup, message)
 				}
-				message = message + expires
-				return NewLobbyError(KickedFromLobbyGroup, message)
 			}
 		}
 	}
 
 	if gg.IsLimitedAccess(userID) {
-
 		switch lobbyParams.Mode {
 		case evr.ModeArenaPublic, evr.ModeCombatPublic, evr.ModeSocialPublic:
 			metricsTags["error"] = "limited_access_user"

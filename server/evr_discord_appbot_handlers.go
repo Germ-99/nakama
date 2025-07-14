@@ -134,7 +134,7 @@ func (d *DiscordAppBot) handleInteractionApplicationCommand(ctx context.Context,
 			return simpleInteractionResponse(s, i, "You must be a guild enforcer to use this command.")
 		}
 
-	case "set-command-channel", "generate-button":
+	case "set-command-channel", "generate-button", "suspend":
 
 		gg := d.guildGroupRegistry.Get(groupID)
 		if gg == nil {
@@ -327,6 +327,18 @@ func (d *DiscordAppBot) handleInteractionMessageComponent(ctx context.Context, l
 	case "igp":
 
 		return d.handleInGamePanelInteraction(i, value)
+	case "suspend_player_select":
+		return d.handleSuspendPlayerSelect(ctx, logger, s, i, user, member, userID, groupID, value)
+	case "suspend_player_lookup":
+		return d.handleSuspendPlayerLookup(ctx, logger, s, i, user, member, userID, groupID, value)
+	case "suspend_player_confirm":
+		return d.handleSuspendPlayerConfirm(ctx, logger, s, i, user, member, userID, groupID, value)
+	case "suspend_player_temp_ban":
+		return d.handleSuspendPlayerTempBan(ctx, logger, s, i, user, member, userID, groupID, value)
+	case "suspend_player_add_notes":
+		return d.handleSuspendPlayerAddNotes(ctx, logger, s, i, user, member, userID, groupID, value)
+	case "suspend_player_activate":
+		return d.handleSuspendPlayerActivate(ctx, logger, s, i, user, member, userID, groupID, value)
 	}
 
 	return nil
@@ -445,7 +457,7 @@ func (d *DiscordAppBot) handleCreateMatch(ctx context.Context, logger runtime.Lo
 	return label, latencyMillis, nil
 }
 
-func (d *DiscordAppBot) kickPlayer(logger runtime.Logger, i *discordgo.InteractionCreate, caller *discordgo.Member, target *discordgo.User, duration, userNotice, notes string, requireCommunityValues bool) error {
+func (d *DiscordAppBot) kickPlayer(logger runtime.Logger, i *discordgo.InteractionCreate, caller *discordgo.Member, target *discordgo.User, duration, userNotice, notes string, requireCommunityValues, allowPrivateLobbyAccess bool) error {
 	var (
 		ctx                = d.ctx
 		nk                 = d.nk
@@ -541,7 +553,7 @@ func (d *DiscordAppBot) kickPlayer(logger runtime.Logger, i *discordgo.Interacti
 		if addSuspension {
 			// Add a new record
 			actions = append(actions, fmt.Sprintf("suspension expires <t:%d:R>", suspensionExpiry.UTC().Unix()))
-			record := journal.AddRecord(groupID, callerUserID, caller.User.ID, userNotice, notes, requireCommunityValues, suspensionDuration)
+			record := journal.AddRecord(groupID, callerUserID, caller.User.ID, userNotice, notes, requireCommunityValues, allowPrivateLobbyAccess, suspensionDuration)
 			recordsByGroupID[groupID] = append(recordsByGroupID[groupID], record)
 
 		} else if voidActiveSuspensions {
