@@ -8,5 +8,11 @@ applyTo: '**.go'
 - Write messages in the imperative mood and focus on describing what the change does.
 
 
+# Go Code Style
+- Use syntax for the latest Go version.
+- use any instead of interface{}.
+
+
+
 
 

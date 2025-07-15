@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"math/rand"
 	"net"
 	"regexp"
@@ -245,10 +244,6 @@ func (e *DiscordAppBot) loadPrepareMatchRateLimiter(userID, groupID string) *rat
 	return limiter
 }
 
-const (
-	ApplicationCommandGameService = "game-service"
-)
-
 var (
 	partyGroupIDPattern = regexp.MustCompile("^[a-z0-9]+$")
 )
@@ -283,13 +278,6 @@ func (d *DiscordAppBot) AppCommands() []*DiscordAppCommand {
 				return d.handleLinkHeadsetInteraction(ctx, logger, s, i, options[0].StringValue())
 			},
 			aliases: []string{"link-headset"},
-		},
-		{
-			ApplicationCommand: &discordgo.ApplicationCommand{
-				Name:        "suspend",
-				Description: "Suspend a player from the guild.",
-			},
-			handler: d.handleSuspend,
 		},
 		{
 			ApplicationCommand: &discordgo.ApplicationCommand{
@@ -2226,7 +2214,6 @@ func (d *DiscordAppBot) AppCommands() []*DiscordAppCommand {
 
 				if member == nil {
 					return simpleInteractionResponse(s, i, "this command must be used from a guild")
-
 				}
 				mode := evr.ModeArenaPrivate
 				region := "default"
@@ -2860,7 +2847,7 @@ func (d *DiscordAppBot) AppCommands() []*DiscordAppCommand {
 						metadata.LoadoutCosmetics = *outfits[outfitName]
 
 						if err := EVRProfileUpdate(ctx, d.nk, userID, metadata); err != nil {
-							return fmt.Errorf("Failed to set account metadata: %w", err)
+							return fmt.Errorf("failed to set account metadata: %w", err)
 						}
 
 						return simpleInteractionResponse(s, i, fmt.Sprintf("Applied outfit `%s`. If the changes do not take effect in your next match, Please re-open your game.", outfitName))
@@ -2984,6 +2971,13 @@ func (d *DiscordAppBot) RegisterSlashCommands() error {
 				}
 			}
 
+			if userID != uuid.Nil {
+				logger = logger.WithField("user_id", userID.String())
+			} else {
+				logger.Warn("User ID is nil, cannot process interaction")
+				return simpleInteractionResponse(s, i, "Account not found. Please try again later.")
+			}
+
 			if guildGroup = d.guildGroupRegistry.Get(groupID.String()); guildGroup == nil {
 				// If the guild group is not found, try to get it from the cache
 				groupID = uuid.FromStringOrNil(d.cache.GuildIDToGroupID(i.GuildID))
@@ -3000,6 +2994,11 @@ func (d *DiscordAppBot) RegisterSlashCommands() error {
 			ctx = context.WithValue(ctx, ctxProfileKey{}, profile)
 			ctx = context.WithValue(ctx, ctxGuildGroupKey{}, guildGroup)
 
+			logger = logger.WithFields(map[string]any{
+				"uid": userID.String(),
+				"gid": groupID.String(),
+			})
+
 			switch i.Type {
 
 			case discordgo.InteractionApplicationCommand:
@@ -3007,8 +3006,6 @@ func (d *DiscordAppBot) RegisterSlashCommands() error {
 				logger = logger.WithFields(map[string]any{
 					"app_command": appCommandName,
 					"options":     i.ApplicationCommandData().Options,
-					"uid":         userID.String(),
-					"gid":         groupID.String(),
 				})
 
 				if handler, ok := commandHandlers[appCommandName]; ok {
@@ -3024,12 +3021,16 @@ func (d *DiscordAppBot) RegisterSlashCommands() error {
 				}
 
 			case discordgo.InteractionMessageComponent:
+				data := i.MessageComponentData()
 
-				logger.Info("Handling interaction message component.")
+				logger := logger
 
 				err := d.handleInteractionMessageComponent(ctx, logger, s, i)
 				if err != nil {
-					logger.WithField("err", err).Warn("Failed to handle interaction message component")
+					logger.WithFields(map[string]any{
+						"custom_id": data.CustomID,
+						"values":    data.Values,
+						"error":     err}).Warn("Failed to handle interaction message component")
 					return simpleInteractionResponse(s, i, err.Error())
 				}
 
@@ -3173,52 +3174,62 @@ func (d *DiscordAppBot) RegisterSlashCommands() error {
 	})
 
 	// Register global guild commands
-	d.updateSlashCommands(dg, d.logger, "")
+	d.updateGlobalSlashCommands(dg, d.logger)
 	d.logger.Info("%d Slash commands registered/updated in %d guilds.", len(appCommands), len(dg.State.Guilds))
 
 	return nil
 }
 
-func (d *DiscordAppBot) updateSlashCommands(s *discordgo.Session, logger runtime.Logger, guildID string) {
+func (d *DiscordAppBot) updateGlobalSlashCommands(s *discordgo.Session, logger runtime.Logger) {
 	// create a map of current commands
-	currentCommands := make(map[string]*discordgo.ApplicationCommand, 0)
+	activeCommands := make(map[string]*discordgo.ApplicationCommand, 0)
 
-	for _, command := range d.AppCommands() {
-		currentCommands[command.Name] = command.ApplicationCommand
-		for _, alias := range command.aliases {
-			currentCommands[alias] = command.ApplicationCommand
+	for _, c := range d.AppCommands() {
+		for _, alias := range append(c.aliases, c.Name) {
+			if activeCommands[c.Name] != nil {
+				panic("Duplicate command name found" + c.Name)
+			}
+			// Make a copy of the command to avoid modifying the original
+			clone := *c.ApplicationCommand
+			// Set the name to the alias
+			clone.Name = alias
+			activeCommands[alias] = &clone
 		}
 	}
 
 	// Get the bot's current global application existingCommands
-	if existingCommands, err := s.ApplicationCommands(s.State.Application.ID, guildID); err != nil {
+	if existingCommands, err := s.ApplicationCommands(s.State.Application.ID, ""); err != nil {
 		logger.WithField("err", err).Error("Failed to get application commands.")
 		return
 	} else {
 		// Remove existing commands that are not in the current commands
 		for _, command := range existingCommands {
-			if _, ok := currentCommands[command.Name]; !ok {
+			if _, found := activeCommands[command.Name]; !found {
 				logger.Info("Deleting orphaned command: %s", command.Name)
 				// If the command is not in the current commands, delete it
-				if err := s.ApplicationCommandDelete(s.State.Application.ID, guildID, command.ID); err != nil {
+				if err := s.ApplicationCommandDelete(s.State.Application.ID, "", command.ID); err != nil {
 					logger.WithField("err", err).Error("Failed to delete application command.")
 				}
 			}
 		}
 	}
 
-	// Bulk overwrite the application commands with the current commands
-	commands := slices.Collect(maps.Values(currentCommands))
-	if _, err := s.ApplicationCommandBulkOverwrite(s.State.Application.ID, guildID, commands); err != nil {
-		commandNames := maps.Keys(currentCommands)
+	var names []string
+
+	var commands []*discordgo.ApplicationCommand
+	for name, command := range activeCommands {
+		commands = append(commands, command)
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	if _, err := s.ApplicationCommandBulkOverwrite(s.State.Application.ID, "", commands); err != nil {
 		logger.WithFields(map[string]any{
-			"guild_id":      guildID,
-			"command_names": commandNames,
-			"command_count": len(currentCommands),
+			"command_names": names,
+			"command_count": len(activeCommands),
 			"error":         err,
 		}).Error("Failed to bulk overwrite application commands.")
 	}
-
 }
 
 func getScopedUser(i *discordgo.InteractionCreate) *discordgo.User {

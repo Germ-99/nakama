@@ -253,6 +253,19 @@ func (l GuildEnforcementJournalList) Latest(groupIDs []string) (string, string, 
 	return latest.GroupID, latest.UserID, latest.Record
 }
 
+func (l GuildEnforcementJournalList) Get(userID string) (*GuildEnforcementJournal, bool) {
+	journal, ok := l[userID]
+	return journal, ok
+}
+
+func (l GuildEnforcementJournalList) Journals() []*GuildEnforcementJournal {
+	journals := make([]*GuildEnforcementJournal, 0, len(l))
+	for _, journal := range l {
+		journals = append(journals, journal)
+	}
+	return journals
+}
+
 func EnforcementJournalsLoad(ctx context.Context, nk runtime.NakamaModule, userIDs []string) (GuildEnforcementJournalList, error) {
 
 	ops := make([]*runtime.StorageRead, 0, len(userIDs))

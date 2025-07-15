@@ -109,9 +109,33 @@ func (p *InGamePanel) displayErrorMessage(err error) (*discordgo.Message, error)
 	return p.displayMessage(fmt.Sprintf("Error: %s", err.Error()))
 }
 
+func (p *InGamePanel) offlineActions() []discordgo.MessageComponent {
+	return []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.Button{
+					Label:    "Set IGN",
+					Style:    discordgo.SecondaryButton,
+					CustomID: "igp:" + p.userID + ":set_ign",
+				},
+			},
+		},
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.SelectMenu{
+					MenuType:    discordgo.UserSelectMenu,
+					CustomID:    "igp:" + p.userID + ":select_player",
+					Placeholder: "<select a player to moderate>",
+				},
+			},
+		},
+	}
+}
+
 func (p *InGamePanel) displayMessage(content string) (*discordgo.Message, error) {
 	embeds := make([]*discordgo.MessageEmbed, 0)
-	components := make([]discordgo.MessageComponent, 0)
+	components := p.offlineActions()
+
 	return p.dg.InteractionResponseEdit(p.Interaction(), &discordgo.WebhookEdit{
 		Content:    ptr.String(content),
 		Components: &components,
@@ -140,6 +164,7 @@ func (p *InGamePanel) retrieveCurrentMatchLabel(ctx context.Context, userID stri
 
 	return label, nil
 }
+
 func (p *InGamePanel) NewInteraction(i *discordgo.InteractionCreate) (*discordgo.InteractionCreate, error) {
 	prevInteraction := p.interactionCreate.Swap(i)
 	// Send the initial interaction response saying "finding session"
@@ -162,7 +187,10 @@ func (p *InGamePanel) Start() {
 	timeoutTimer := time.NewTimer(InGamePanelTimeout)
 	defer timeoutTimer.Stop()
 
-	p.displayMessage(fmt.Sprintf("Waiting for player session... (timeout <t:%d:R>)", time.Now().Add(3*time.Minute).UTC().Unix()))
+	if _, err := p.displayMessage(fmt.Sprintf("Waiting for player session... (timeout <t:%d:R>)", time.Now().Add(3*time.Minute).UTC().Unix())); err != nil {
+		logger.WithField("error", err).Error("Failed to send initial message")
+		return
+	}
 	// Find the active session for the user
 SessionLoop:
 	for {
@@ -299,7 +327,7 @@ SessionLoop:
 			// Check if the player user ID set has changed
 			if interaction != prevInteraction || !maps.Equal(prevPlayerUserIDSet, latestPlayerUserIDSet) {
 				prevInteraction = interaction
-				// Update the mode panel
+				// Update the mod panel
 				webHookEdit := p.createUpdateEdit(guildID, label, recentPlayers)
 				if _, err := p.dg.InteractionResponseEdit(p.Interaction(), webHookEdit); err != nil {
 					logger.WithField("error", err).Error("Failed to edit message")
@@ -374,6 +402,10 @@ func (p *InGamePanel) createUpdateEdit(guildID string, label *MatchLabel, recent
 					Style:    discordgo.SecondaryButton,
 					CustomID: "igp:" + p.userID + ":set_ign",
 				},
+			},
+		},
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
 				discordgo.SelectMenu{
 					MenuType:      discordgo.StringSelectMenu,
 					CustomID:      "igp:" + p.userID + ":select_player",
@@ -576,7 +608,7 @@ func (p *InGamePanel) createSetIGNModal(currentDisplayName string) *discordgo.In
 		Type: discordgo.InteractionResponseModal,
 		Data: &discordgo.InteractionResponseData{
 			CustomID: "igp:set_ign_modal",
-			Title:    "Set IGN",
+			Title:    "Set In-Game Name",
 			Components: []discordgo.MessageComponent{
 				discordgo.ActionsRow{
 					Components: []discordgo.MessageComponent{
@@ -594,14 +626,16 @@ func (p *InGamePanel) createSetIGNModal(currentDisplayName string) *discordgo.In
 	}
 }
 
-func (p *InGamePanel) HandleInteraction(i *discordgo.InteractionCreate, command string) error {
+func (p *InGamePanel) HandleInteraction(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	if p.IsStopped() {
 		return fmt.Errorf("panel is stopped")
 	}
 
-	action, value, _ := strings.Cut(command, ":")
-
 	data := i.Interaction.MessageComponentData()
+
+	customID := strings.TrimPrefix(data.CustomID, "igp:")
+
+	action, value, _ := strings.Cut(customID, ":")
 
 	switch action {
 	case "set_ign":
@@ -658,22 +692,6 @@ func (p *InGamePanel) HandleInteraction(i *discordgo.InteractionCreate, command 
 		return fmt.Errorf("unknown action: %s", action)
 
 	}
-
-}
-
-func (d *DiscordAppBot) handleInGamePanelInteraction(i *discordgo.InteractionCreate, value string) error {
-
-	// Split off the userID and command
-	userID, command, _ := strings.Cut(value, ":")
-
-	// Load the existing InGamePanel instance for the user
-	// If it doesn't exist, create a new one and replace this interaction
-	igp, ok := d.igpRegistry.Load(userID)
-	if !ok {
-		return fmt.Errorf("no active panel found")
-	}
-
-	return igp.HandleInteraction(i, command)
 }
 
 func (d *DiscordAppBot) handleModalSubmit(logger runtime.Logger, i *discordgo.InteractionCreate, value string) error {
@@ -703,13 +721,9 @@ func (d *DiscordAppBot) handleModalSubmit(logger runtime.Logger, i *discordgo.In
 }
 
 func (d *DiscordAppBot) handleInGamePanel(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate, user *discordgo.User, member *discordgo.Member, userID string, groupID string) error {
-
-	var (
-		igp *InGamePanel
-		ok  bool
-	)
-
-	if igp, ok = d.igpRegistry.Load(userID); ok {
+	// Try to load an existing InGamePanel for the user
+	igp, ok := d.igpRegistry.Load(userID)
+	if ok {
 		igp.Stop()
 	}
 
@@ -720,10 +734,16 @@ func (d *DiscordAppBot) handleInGamePanel(ctx context.Context, logger runtime.Lo
 	// Start a goroutine to handle the interaction, and keep it updated
 	go igp.Start()
 
+	// Store the InGamePanel in the registry
 	d.igpRegistry.Store(userID, igp)
 	go func() {
+		// Wait for the context to be done then delete the InGamePanel from the registry
 		<-igp.ctx.Done()
 		d.igpRegistry.Delete(userID)
+		// Delete the interaction response
+		if err := s.InteractionResponseDelete(igp.Interaction()); err != nil {
+			logger.WithField("error", err).Error("Failed to delete interaction response")
+		}
 	}()
 
 	if prevInteraction, err := igp.NewInteraction(i); err != nil {

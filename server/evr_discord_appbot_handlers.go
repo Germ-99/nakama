@@ -155,15 +155,15 @@ func (d *DiscordAppBot) handleInteractionApplicationCommand(ctx context.Context,
 func (d *DiscordAppBot) handleInteractionMessageComponent(ctx context.Context, logger runtime.Logger, s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	nk := d.nk
 
-	customID := i.MessageComponentData().CustomID
-	commandName, subCommand, _ := strings.Cut(customID, ":")
+	data := i.MessageComponentData()
+	commandName, subCommand, _ := strings.Cut(data.CustomID, ":")
 
 	logger = logger.WithFields(map[string]any{
 		"custom_id":   commandName,
 		"sub_command": subCommand,
 	})
 
-	userID := ctx.Value(ctxUserIDKey{}).(string)
+	profile := ctx.Value(ctxProfileKey{}).(*EVRProfile)
 
 	switch commandName {
 	case "game-service":
@@ -172,7 +172,7 @@ func (d *DiscordAppBot) handleInteractionMessageComponent(ctx context.Context, l
 	case "approve_ip":
 
 		history := &LoginHistory{}
-		if err := StorageRead(ctx, nk, userID, history, true); err != nil {
+		if err := StorageRead(ctx, nk, profile.ID(), history, true); err != nil {
 			return fmt.Errorf("failed to load login history: %w", err)
 		}
 
@@ -200,7 +200,7 @@ func (d *DiscordAppBot) handleInteractionMessageComponent(ctx context.Context, l
 			if err := history.AuthorizeIPWithCode(strs[0], strs[1]); err != nil {
 
 				// Store the history
-				if err := StorageWrite(ctx, nk, userID, history); err != nil {
+				if err := StorageWrite(ctx, nk, profile.ID(), history); err != nil {
 					return fmt.Errorf("failed to save login history: %w", err)
 				}
 
@@ -232,7 +232,7 @@ func (d *DiscordAppBot) handleInteractionMessageComponent(ctx context.Context, l
 			}
 		}
 
-		if err := StorageWrite(ctx, nk, userID, history); err != nil {
+		if err := StorageWrite(ctx, nk, profile.ID(), history); err != nil {
 			return fmt.Errorf("failed to save login history: %w", err)
 		}
 
@@ -314,7 +314,7 @@ func (d *DiscordAppBot) handleInteractionMessageComponent(ctx context.Context, l
 			return simpleInteractionResponse(s, i, err.Error())
 		}
 
-		if err := UnlinkXPID(ctx, RuntimeLoggerToZapLogger(logger), d.db, uuid.FromStringOrNil(userID), *xpID); err != nil {
+		if err := UnlinkXPID(ctx, RuntimeLoggerToZapLogger(logger), d.db, profile.UUID(), *xpID); err != nil {
 			return fmt.Errorf("failed to unlink device ID: %w", err)
 		}
 
@@ -336,25 +336,14 @@ func (d *DiscordAppBot) handleInteractionMessageComponent(ctx context.Context, l
 			return fmt.Errorf("failed to respond to interaction: %w", err)
 		}
 	case "igp":
-		data := i.Interaction.MessageComponentData()
-		if len(data.Values) == 0 {
-			return simpleInteractionResponse(s, i, "Invalid device ID.")
+		// Load the in-game panel
+		userID := d.cache.DiscordIDToUserID(i.Member.User.ID)
+		igp, ok := d.igpRegistry.Load(userID)
+		if !ok {
+			return fmt.Errorf("no active panel found")
 		}
-		return d.handleInGamePanelInteraction(i, data.Values[0])
-	case "suspend_player_select":
-		return d.handleSuspendPlayerSelect(ctx, logger, s, i, subCommand)
-	case "suspend_player_lookup":
-		return d.handleSuspendPlayerLookup(ctx, logger, s, i, subCommand)
-	case "suspend_player_confirm":
-		return d.handleSuspendPlayerConfirm(ctx, logger, s, i, subCommand)
-	case "suspend_player_temp_ban":
-		return d.handleSuspendPlayerTempBan(ctx, logger, s, i, subCommand)
-	case "suspend_player_add_notes":
-		return d.handleSuspendPlayerAddNotes(ctx, logger, s, i, subCommand)
-	case "suspend_player_activate":
-		return d.handleSuspendPlayerActivate(ctx, logger, s, i, subCommand)
+		return igp.HandleInteraction(ctx, logger, s, i)
 	}
-
 	return nil
 }
 
