@@ -166,6 +166,10 @@ func (a EVRProfile) ID() string {
 	return a.account.User.Id
 }
 
+func (a EVRProfile) UUID() uuid.UUID {
+	return uuid.FromStringOrNil(a.ID())
+}
+
 func (a EVRProfile) Username() string {
 	return a.account.User.Username
 }
