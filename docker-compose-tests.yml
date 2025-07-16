@@ -5,7 +5,7 @@ services:
     command: -c 'max_connections=1000'
     environment:
       - POSTGRES_DB=nakama
-      - POSTGRES_PASSWORD=localdb
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-localdb}
     expose:
       - "5432"
     healthcheck:
@@ -20,12 +20,14 @@ services:
       context: .
       dockerfile: ./build/Dockerfile
     image: nakama-tests
+    environment:
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-localdb}@db:5432/nakama?sslmode=disable
     entrypoint:
       - "/bin/sh"
       - "-ecx"
       - >
-        /nakama/nakama migrate up --database.address postgres:localdb@db:5432/nakama &&
-        exec /nakama/nakama --logger.level DEBUG --name nakama --database.address postgres:localdb@db:5432/nakama --session.token_expiry_sec 7200 --socket.port 7350 --console.port 7351
+        /nakama/nakama migrate up --database.address $$DATABASE_URL &&
+        exec /nakama/nakama --logger.level DEBUG --name nakama --database.address $$DATABASE_URL --session.token_expiry_sec 7200 --socket.port 7350 --console.port 7351
     restart: always
     links:
       - "db:db"
@@ -46,7 +48,7 @@ services:
       working_dir: "/nakama"
       environment:
         - "GODEBUG=netdns=cgo"
-        - TEST_DB_URL=postgresql://postgres:localdb@db:5432/nakama?sslmode=disable
+        - TEST_DB_URL=${DATABASE_URL:-postgresql://postgres:localdb@db:5432/nakama?sslmode=disable}
       volumes:
         - "./:/nakama"
         - "lua:/nakama/internal/gopher-lua/_lua5.1-tests/libs"

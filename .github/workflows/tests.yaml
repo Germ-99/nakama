@@ -12,8 +12,14 @@ jobs:
         uses: actions/checkout@v3
 
       - name: Run tests
+        env:
+          POSTGRES_PASSWORD: testpassword
+          DATABASE_URL: postgresql://postgres:testpassword@db:5432/nakama?sslmode=disable
         run: docker compose -f ./docker-compose-tests.yml up --build --abort-on-container-exit
 
       - name: Cleanup
         if: always()
+        env:
+          POSTGRES_PASSWORD: testpassword
+          DATABASE_URL: postgresql://postgres:testpassword@db:5432/nakama?sslmode=disable
         run: docker compose -f ./docker-compose-tests.yml down -v
