@@ -1,0 +1,17 @@
+[Unit]
+Description=Nakama Social Server
+After=network.target
+
+[Service]
+Type=simple
+User=nakama
+Group=nakama
+ExecStart=/usr/local/bin/nakama --config /etc/nakama/config.yml
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nakama
+
+[Install]
+WantedBy=multi-user.target

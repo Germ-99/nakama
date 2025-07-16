@@ -18,37 +18,6 @@ services:
       interval: 3s
       timeout: 3s
       retries: 5
-  nakama:
-    container_name: nakama
-    image: echotools/nakama:latest
-    environment:
-      - DATABASE_URL=postgres:localdb@postgres:5432/nakama
-    entrypoint:
-      - "/bin/sh"
-      - "-ecx"
-      - >
-          /nakama/nakama migrate up --database.address $$DATABASE_URL &&
-          exec /nakama/nakama --name nakama1 --database.address $$DATABASE_URL --config=/data/nakama.yml --logger.level DEBUG --session.token_expiry_sec 7200
-   
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ./:/nakama/data
-    expose:
-      - "7349"
-      - "7350"
-      - "7351"
-    ports:
-      - "7349:7349"
-      - "7350:7350"
-      - "7351:7351"
-    healthcheck:
-      test: ["CMD", "/nakama/nakama", "healthcheck"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 volumes:
   data:
 
