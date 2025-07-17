@@ -268,6 +268,234 @@ func (p *EvrPipeline) processLoginRequest(ctx context.Context, logger *zap.Logge
 	return nil
 }
 
+func (p *EvrPipeline) loadGuildGroups(ctx context.Context, logger *zap.Logger, session *sessionWS, params *SessionParameters) (map[string]*GuildGroup, error) {
+	metricsTags := params.MetricsTags()
+	groups, err := GuildUserGroupsList(ctx, p.nk, p.guildGroupRegistry, params.profile.ID())
+	if err != nil {
+		metricsTags["error"] = "failed_get_groups"
+		return nil, fmt.Errorf("failed to get groups: %w", err)
+	}
+
+	if len(groups) == 0 {
+		// User is not in any groups
+		metricsTags["error"] = "user_not_in_any_groups"
+		guildID := p.discordCache.GroupIDToGuildID(params.profile.ActiveGroupID)
+		p.discordCache.QueueSyncMember(guildID, params.profile.DiscordID(), true)
+
+		return nil, fmt.Errorf("user is not in any groups, try again in 30 seconds")
+	}
+
+	return groups, nil
+}
+
+func (p *EvrPipeline) setActiveGuildGroup(ctx context.Context, logger *zap.Logger, session *sessionWS, params *SessionParameters) (bool, error) {
+	if params.profile.GetActiveGroupID() != uuid.Nil {
+		return false, nil
+	}
+
+	// Active group is not set.
+	groupIDs := make([]string, 0, len(params.guildGroups))
+	for id := range params.guildGroups {
+		groupIDs = append(groupIDs, id)
+	}
+
+	// Sort the groups by the edgecount
+	slices.SortStableFunc(groupIDs, func(a, b string) int {
+		return int(params.guildGroups[a].Group.EdgeCount - params.guildGroups[b].Group.EdgeCount)
+	})
+	slices.Reverse(groupIDs)
+
+	params.profile.SetActiveGroupID(uuid.FromStringOrNil(groupIDs[0]))
+	logger.Debug("Set active group", zap.String("uid", params.profile.UserID()), zap.String("gid", params.profile.ActiveGroupID))
+
+	return true, nil
+}
+
+func (p *EvrPipeline) updateUserPermissions(ctx context.Context, logger *zap.Logger, session *sessionWS, params *SessionParameters) error {
+	metricsTags := params.MetricsTags()
+	if ismember, err := CheckSystemGroupMembership(ctx, p.db, session.userID.String(), GroupGlobalDevelopers); err != nil {
+		metricsTags["error"] = "group_check_failed"
+		return fmt.Errorf("failed to check system group membership: %w", err)
+	} else if ismember {
+		params.isGlobalDeveloper = true
+		params.isGlobalOperator = true
+
+	} else if ismember, err := CheckSystemGroupMembership(ctx, p.db, params.UserID(), GroupGlobalOperators); err != nil {
+		metricsTags["error"] = "group_check_failed"
+		return fmt.Errorf("failed to check system group membership: %w", err)
+	} else if ismember {
+		params.isGlobalOperator = true
+	}
+	return nil
+}
+
+func (p *EvrPipeline) updateMatchmakingSettings(ctx context.Context, logger *zap.Logger, session *sessionWS, params *SessionParameters) error {
+	globalSettings := ServiceSettings()
+	settings, err := LoadMatchmakingSettings(ctx, p.nk, session.userID.String())
+	if err != nil {
+		logger.Warn("Failed to load matchmaking settings", zap.Error(err))
+		return fmt.Errorf("failed to load matchmaking settings: %w", err)
+	}
+	updated := false
+	// If the player account is less than 7 days old, then assign the "green" division to the player.
+	if time.Since(params.profile.account.User.CreateTime.AsTime()) < time.Duration(globalSettings.Matchmaking.GreenDivisionMaxAccountAgeDays)*24*time.Hour {
+		if !slices.Contains(settings.Divisions, "green") {
+			settings.Divisions = append(settings.Divisions, "green")
+			updated = true
+		}
+		if slices.Contains(settings.ExcludedDivisions, "green") {
+			updated = true
+			// Remove the "green" division from the excluded divisions.
+			for i := 0; i < len(settings.ExcludedDivisions); i++ {
+				if settings.ExcludedDivisions[i] == "green" {
+					settings.ExcludedDivisions = slices.Delete(settings.ExcludedDivisions, i, i+1)
+					i--
+				}
+			}
+
+		}
+
+	} else {
+		if slices.Contains(settings.Divisions, "green") {
+			// Remove the "green" division from the divisions.
+			updated = true
+			for i := 0; i < len(settings.Divisions); i++ {
+				// Remove the "green" division from the divisions.
+				if settings.Divisions[i] == "green" {
+					settings.Divisions = slices.Delete(settings.Divisions, i, i+1)
+					i--
+				}
+			}
+		}
+		if !slices.Contains(settings.ExcludedDivisions, "green") {
+			updated = true
+			// Add the "green" division to the excluded divisions.
+			settings.ExcludedDivisions = append(settings.ExcludedDivisions, "green")
+
+		}
+	}
+
+	if updated {
+		if err := StoreMatchmakingSettings(ctx, p.nk, session.userID.String(), settings); err != nil {
+			logger.Warn("Failed to save matchmaking settings", zap.Error(err))
+			return fmt.Errorf("failed to save matchmaking settings: %w", err)
+		}
+	}
+
+	params.matchmakingSettings = &settings
+	return nil
+}
+
+func (p *EvrPipeline) updateUserProfile(ctx context.Context, logger *zap.Logger, session *sessionWS, params *SessionParameters) (bool, error) {
+	metricsTags := params.MetricsTags()
+	metadataUpdated := false
+	if !params.profile.AllowBrokenCosmetics {
+		if u := params.profile.FixBrokenCosmetics(); u {
+			metadataUpdated = true
+		}
+	}
+	eqconfig := NewEarlyQuitConfig()
+	if err := StorageRead(ctx, p.nk, params.profile.ID(), eqconfig, true); err != nil {
+		logger.Warn("Failed to load early quitter config", zap.Error(err))
+	} else {
+		params.earlyQuitConfig.Store(eqconfig)
+	}
+
+	if metadataUpdated {
+		if err := p.nk.AccountUpdateId(ctx, params.profile.ID(), "", params.profile.MarshalMap(), params.profile.GetActiveGroupDisplayName(), "", "", "", ""); err != nil {
+			metricsTags["error"] = "failed_update_profile"
+			return false, fmt.Errorf("failed to update user profile: %w", err)
+		}
+	}
+	return metadataUpdated, nil
+}
+
+func (p *EvrPipeline) updateUserDisplayNames(ctx context.Context, logger *zap.Logger, session *sessionWS, params *SessionParameters) (err error) {
+	// Load the display name history for the player.
+	params.displayNameHistory, err = DisplayNameHistoryLoad(ctx, p.nk, session.userID.String())
+	if err != nil {
+		logger.Warn("Failed to load display name history", zap.Error(err))
+		return fmt.Errorf("failed to load display name history: %w", err)
+	}
+
+	// Update the player's active group (default) display name.
+	defaultDisplayName, _ := params.displayNameHistory.LatestGroup(params.profile.ActiveGroupID)
+	if defaultDisplayName == "" {
+		// If the active group display name is empty, set it to the username.
+		defaultDisplayName = params.profile.Username()
+	} else if params.userDisplayNameOverride != "" {
+		// If the user has provided a display name override, use that.
+		defaultDisplayName = params.userDisplayNameOverride
+	} else if dn := params.profile.GetDisplayNameOverride(params.profile.ActiveGroupID); dn != "" {
+		// If the profile has a display name override for the active group, use that.
+		defaultDisplayName = dn
+	}
+	// Set the default (active group) display name in the profile.
+	params.profile.SetGroupDisplayName(params.profile.ActiveGroupID, defaultDisplayName)
+
+	// Check if any of the player's current in-game names are owned by someone else.
+	displayNames := make([]string, 0)
+	for _, dn := range params.profile.DisplayNamesByGroupID() {
+		displayNames = append(displayNames, dn)
+	}
+	// If the display name is owned by someone else, then remove it from the player's profile.
+	globalSettings := ServiceSettings()
+	if ownerMap, err := DisplayNameOwnerSearch(ctx, p.nk, displayNames); err != nil {
+		logger.Warn("Failed to check display name owner", zap.Any("display_names", displayNames), zap.Error(err))
+	} else {
+		// Prune the in-game names that are owned by someone else.
+		for _, dn := range params.profile.DisplayNamesByGroupID() {
+			if ownerIDs, ok := ownerMap[dn]; ok && !slices.Contains(ownerIDs, params.profile.ID()) {
+				// This display name is owned by someone else.
+				for gID, gn := range params.profile.DisplayNamesByGroupID() {
+					if strings.EqualFold(gn, dn) {
+						// This display name is owned by someone else.
+						params.profile.DeleteGroupDisplayName(gID)
+						if globalSettings.DisplayNameInUseNotifications {
+							// Notify the player that this display name is in use.
+							ownerDiscordID := p.discordCache.UserIDToDiscordID(ownerIDs[0])
+							go func() {
+								if err := p.discordCache.SendDisplayNameInUseNotification(ctx, params.profile.DiscordID(), ownerDiscordID, dn, params.profile.Username()); err != nil {
+									logger.Warn("Failed to send display name in use notification", zap.Error(err))
+								}
+							}()
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Update the in-game names for the player (in the display name history).
+	igns := make([]string, 0, len(params.profile.DisplayNamesByGroupID()))
+	for groupID := range params.profile.DisplayNamesByGroupID() {
+		igns = append(igns, params.profile.GetGroupDisplayNameOrDefault(groupID))
+	}
+	params.displayNameHistory.ReplaceInGameNames(igns)
+
+	// Update the display name history for the active group, marking this name as an in-game-name.
+	activeGroupDisplayName, _ := params.displayNameHistory.LatestGroup(params.profile.ActiveGroupID)
+	params.displayNameHistory.Update(params.profile.ActiveGroupID, activeGroupDisplayName, params.profile.Username(), true)
+	if gg := params.guildGroups[params.profile.ActiveGroupID]; gg != nil {
+		if gg.DisplayNameForceNickToIGN || gg.DisplayNameSetNickToIGNAtLogin {
+			// If the name is forced, then set the display name to the current in-game name when the player logs in.
+			go func() {
+				if member, err := p.discordCache.GuildMember(gg.GuildID, params.DiscordID()); err == nil && member != nil && InGameName(member) != activeGroupDisplayName {
+					// Set their display name to their current in-game name
+					if err := p.discordCache.dg.GuildMemberNickname(gg.GuildID, params.DiscordID(), activeGroupDisplayName); err != nil {
+						logger.Warn("Failed to set display name", zap.Error(err))
+					}
+				}
+			}()
+		}
+	}
+
+	if err := DisplayNameHistoryStore(ctx, p.nk, session.userID.String(), params.displayNameHistory); err != nil {
+		logger.Warn("Failed to store display name history", zap.Error(err))
+	}
+	return nil
+}
+
 // authenticateSession handles the authentication of the login connection.
 func (p *EvrPipeline) authenticateSession(ctx context.Context, logger *zap.Logger, session *sessionWS, params *SessionParameters) (err error) {
 
@@ -524,21 +752,9 @@ func (p *EvrPipeline) initializeSession(ctx context.Context, logger *zap.Logger,
 		p.nk.MetricsCounterAdd("session_initialize", metricsTags, 1)
 	}()
 
-	metadataUpdated := false
-
-	params.guildGroups, err = GuildUserGroupsList(ctx, p.nk, p.guildGroupRegistry, params.profile.ID())
+	params.guildGroups, err = p.loadGuildGroups(ctx, logger, session, params)
 	if err != nil {
-		metricsTags["error"] = "failed_get_groups"
-		return fmt.Errorf("failed to get groups: %w", err)
-	}
-
-	if len(params.guildGroups) == 0 {
-		// User is not in any groups
-		metricsTags["error"] = "user_not_in_any_groups"
-		guildID := p.discordCache.GroupIDToGuildID(params.profile.ActiveGroupID)
-		p.discordCache.QueueSyncMember(guildID, params.profile.DiscordID(), true)
-
-		return fmt.Errorf("user is not in any groups, try again in 30 seconds")
+		return err
 	}
 
 	if _, ok := params.guildGroups[params.profile.ActiveGroupID]; !ok && params.profile.GetActiveGroupID() != uuid.Nil {
@@ -547,38 +763,12 @@ func (p *EvrPipeline) initializeSession(ctx context.Context, logger *zap.Logger,
 		params.profile.SetActiveGroupID(uuid.Nil)
 	}
 
-	// If the user is not in a group, set the active group to the group with the most members
-	if params.profile.GetActiveGroupID() == uuid.Nil {
-		// Active group is not set.
-
-		groupIDs := make([]string, 0, len(params.guildGroups))
-		for id := range params.guildGroups {
-			groupIDs = append(groupIDs, id)
-		}
-
-		// Sort the groups by the edgecount
-		slices.SortStableFunc(groupIDs, func(a, b string) int {
-			return int(params.guildGroups[a].Group.EdgeCount - params.guildGroups[b].Group.EdgeCount)
-		})
-		slices.Reverse(groupIDs)
-
-		params.profile.SetActiveGroupID(uuid.FromStringOrNil(groupIDs[0]))
-		logger.Debug("Set active group", zap.String("uid", params.profile.UserID()), zap.String("gid", params.profile.ActiveGroupID))
-		metadataUpdated = true
+	if _, err := p.setActiveGuildGroup(ctx, logger, session, params); err != nil {
+		return err
 	}
 
-	if ismember, err := CheckSystemGroupMembership(ctx, p.db, session.userID.String(), GroupGlobalDevelopers); err != nil {
-		metricsTags["error"] = "group_check_failed"
-		return fmt.Errorf("failed to check system group membership: %w", err)
-	} else if ismember {
-		params.isGlobalDeveloper = true
-		params.isGlobalOperator = true
-
-	} else if ismember, err := CheckSystemGroupMembership(ctx, p.db, params.UserID(), GroupGlobalOperators); err != nil {
-		metricsTags["error"] = "group_check_failed"
-		return fmt.Errorf("failed to check system group membership: %w", err)
-	} else if ismember {
-		params.isGlobalOperator = true
+	if err := p.updateUserPermissions(ctx, logger, session, params); err != nil {
+		return err
 	}
 
 	// Update in-memory account metadata for guilds that the user has
@@ -596,159 +786,16 @@ func (p *EvrPipeline) initializeSession(ctx context.Context, logger *zap.Logger,
 	}
 	params.latencyHistory.Store(latencyHistory)
 
-	// Load the display name history for the player.
-	params.displayNameHistory, err = DisplayNameHistoryLoad(ctx, p.nk, session.userID.String())
-	if err != nil {
-		logger.Warn("Failed to load display name history", zap.Error(err))
-		return fmt.Errorf("failed to load display name history: %w", err)
+	if err := p.updateUserDisplayNames(ctx, logger, session, params); err != nil {
+		return err
 	}
 
-	// Update the player's active group (default) display name.
-	defaultDisplayName, _ := params.displayNameHistory.LatestGroup(params.profile.ActiveGroupID)
-	if defaultDisplayName == "" {
-		// If the active group display name is empty, set it to the username.
-		defaultDisplayName = params.profile.Username()
-	} else if params.userDisplayNameOverride != "" {
-		// If the user has provided a display name override, use that.
-		defaultDisplayName = params.userDisplayNameOverride
-	} else if dn := params.profile.GetDisplayNameOverride(params.profile.ActiveGroupID); dn != "" {
-		// If the profile has a display name override for the active group, use that.
-		defaultDisplayName = dn
-	}
-	// Set the default (active group) display name in the profile.
-	params.profile.SetGroupDisplayName(params.profile.ActiveGroupID, defaultDisplayName)
-
-	// Check if any of the player's current in-game names are owned by someone else.
-	displayNames := make([]string, 0)
-	for _, dn := range params.profile.DisplayNamesByGroupID() {
-		displayNames = append(displayNames, dn)
-	}
-	// If the display name is owned by someone else, then remove it from the player's profile.
-	globalSettings := ServiceSettings()
-	if ownerMap, err := DisplayNameOwnerSearch(ctx, p.nk, displayNames); err != nil {
-		logger.Warn("Failed to check display name owner", zap.Any("display_names", displayNames), zap.Error(err))
-	} else {
-		// Prune the in-game names that are owned by someone else.
-		for _, dn := range params.profile.DisplayNamesByGroupID() {
-			if ownerIDs, ok := ownerMap[dn]; ok && !slices.Contains(ownerIDs, params.profile.ID()) {
-				// This display name is owned by someone else.
-				for gID, gn := range params.profile.DisplayNamesByGroupID() {
-					if strings.EqualFold(gn, dn) {
-						// This display name is owned by someone else.
-						params.profile.DeleteGroupDisplayName(gID)
-						if globalSettings.DisplayNameInUseNotifications {
-							// Notify the player that this display name is in use.
-							ownerDiscordID := p.discordCache.UserIDToDiscordID(ownerIDs[0])
-							go func() {
-								if err := p.discordCache.SendDisplayNameInUseNotification(ctx, params.profile.DiscordID(), ownerDiscordID, dn, params.profile.Username()); err != nil {
-									logger.Warn("Failed to send display name in use notification", zap.Error(err))
-								}
-							}()
-						}
-					}
-				}
-			}
-		}
+	if err := p.updateMatchmakingSettings(ctx, logger, session, params); err != nil {
+		return err
 	}
 
-	// Update the in-game names for the player (in the display name history).
-	igns := make([]string, 0, len(params.profile.DisplayNamesByGroupID()))
-	for groupID := range params.profile.DisplayNamesByGroupID() {
-		igns = append(igns, params.profile.GetGroupDisplayNameOrDefault(groupID))
-	}
-	params.displayNameHistory.ReplaceInGameNames(igns)
-
-	// Update the display name history for the active group, marking this name as an in-game-name.
-	activeGroupDisplayName, _ := params.displayNameHistory.LatestGroup(params.profile.ActiveGroupID)
-	params.displayNameHistory.Update(params.profile.ActiveGroupID, activeGroupDisplayName, params.profile.Username(), true)
-	if gg := params.guildGroups[params.profile.ActiveGroupID]; gg != nil {
-		if gg.DisplayNameForceNickToIGN || gg.DisplayNameSetNickToIGNAtLogin {
-			// If the name is forced, then set the display name to the current in-game name when the player logs in.
-			go func() {
-				if member, err := p.discordCache.GuildMember(gg.GuildID, params.DiscordID()); err == nil && member != nil && InGameName(member) != activeGroupDisplayName {
-					// Set their display name to their current in-game name
-					if err := p.discordCache.dg.GuildMemberNickname(gg.GuildID, params.DiscordID(), activeGroupDisplayName); err != nil {
-						logger.Warn("Failed to set display name", zap.Error(err))
-					}
-				}
-			}()
-		}
-	}
-
-	if err := DisplayNameHistoryStore(ctx, p.nk, session.userID.String(), params.displayNameHistory); err != nil {
-		logger.Warn("Failed to store display name history", zap.Error(err))
-	}
-
-	if settings, err := LoadMatchmakingSettings(ctx, p.nk, session.userID.String()); err != nil {
-		logger.Warn("Failed to load matchmaking settings", zap.Error(err))
-		return fmt.Errorf("failed to load matchmaking settings: %w", err)
-	} else {
-		updated := false
-		// If the player account is less than 7 days old, then assign the "green" division to the player.
-		if time.Since(params.profile.account.User.CreateTime.AsTime()) < time.Duration(globalSettings.Matchmaking.GreenDivisionMaxAccountAgeDays)*24*time.Hour {
-			if !slices.Contains(settings.Divisions, "green") {
-				settings.Divisions = append(settings.Divisions, "green")
-				updated = true
-			}
-			if slices.Contains(settings.ExcludedDivisions, "green") {
-				updated = true
-				// Remove the "green" division from the excluded divisions.
-				for i := 0; i < len(settings.ExcludedDivisions); i++ {
-					if settings.ExcludedDivisions[i] == "green" {
-						settings.ExcludedDivisions = slices.Delete(settings.ExcludedDivisions, i, i+1)
-						i--
-					}
-				}
-
-			}
-
-		} else {
-			if slices.Contains(settings.Divisions, "green") {
-				// Remove the "green" division from the divisions.
-				updated = true
-				for i := 0; i < len(settings.Divisions); i++ {
-					// Remove the "green" division from the divisions.
-					if settings.Divisions[i] == "green" {
-						settings.Divisions = slices.Delete(settings.Divisions, i, i+1)
-						i--
-					}
-				}
-			}
-			if !slices.Contains(settings.ExcludedDivisions, "green") {
-				updated = true
-				// Add the "green" division to the excluded divisions.
-				settings.ExcludedDivisions = append(settings.ExcludedDivisions, "green")
-
-			}
-		}
-
-		if updated {
-			if err := StoreMatchmakingSettings(ctx, p.nk, session.userID.String(), settings); err != nil {
-				logger.Warn("Failed to save matchmaking settings", zap.Error(err))
-				return fmt.Errorf("failed to save matchmaking settings: %w", err)
-			}
-		}
-
-		params.matchmakingSettings = &settings
-	}
-
-	if !params.profile.AllowBrokenCosmetics {
-		if u := params.profile.FixBrokenCosmetics(); u {
-			metadataUpdated = true
-		}
-	}
-	eqconfig := NewEarlyQuitConfig()
-	if err := StorageRead(ctx, p.nk, params.profile.ID(), eqconfig, true); err != nil {
-		logger.Warn("Failed to load early quitter config", zap.Error(err))
-	} else {
-		params.earlyQuitConfig.Store(eqconfig)
-	}
-
-	if metadataUpdated {
-		if err := p.nk.AccountUpdateId(ctx, params.profile.ID(), "", params.profile.MarshalMap(), params.profile.GetActiveGroupDisplayName(), "", "", "", ""); err != nil {
-			metricsTags["error"] = "failed_update_profile"
-			return fmt.Errorf("failed to update user profile: %w", err)
-		}
+	if _, err := p.updateUserProfile(ctx, logger, session, params); err != nil {
+		return err
 	}
 
 	s := session

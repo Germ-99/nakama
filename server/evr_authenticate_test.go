@@ -100,7 +100,11 @@ func TestSetDisplayNameByPriority(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := sanitizeDisplayName(tt.args.username)
+			got, err := SetDisplayNameByPriority(tt.args.ctx, tt.args.nk, tt.args.userId, tt.args.username, tt.args.options)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("SetDisplayNameByPriority() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
 			if got != tt.want {
 				t.Errorf("SetDisplayNameByPriority() = %v, want %v", got, tt.want)
 			}

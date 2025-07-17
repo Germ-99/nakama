@@ -114,6 +114,14 @@ func (h *DisplayNameHistory) compile() {
 		}
 	}
 
+	// Add the in-game names to the cache
+	for _, name := range h.InGameNames {
+		if name == "" {
+			continue
+		}
+		cache[strings.ToLower(name)] = struct{}{}
+	}
+
 	// Remove expired in-game names
 	for i := 0; i < len(h.InGameNames); i++ {
 		lastUsed := h.LastUsed[h.InGameNames[i]]
