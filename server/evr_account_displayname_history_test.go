@@ -189,46 +189,46 @@ func contains(slice []string, item string) bool {
 
 func TestDisplayNameOwnerSearchProcessing(t *testing.T) {
 	tests := []struct {
-		name        string
+		name         string
 		displayNames []string
-		expectValid bool
-		description string
+		expectValid  bool
+		description  string
 	}{
 		{
-			name:        "normal display names",
+			name:         "normal display names",
 			displayNames: []string{"player1", "player2"},
-			expectValid: true,
-			description: "should handle normal display names",
+			expectValid:  true,
+			description:  "should handle normal display names",
 		},
 		{
-			name:        "mixed case duplicates",
+			name:         "mixed case duplicates",
 			displayNames: []string{"Player", "PLAYER", "player"},
-			expectValid: true,
-			description: "should handle case-insensitive duplicates",
+			expectValid:  true,
+			description:  "should handle case-insensitive duplicates",
 		},
 		{
-			name:        "with empty strings",
+			name:         "with empty strings",
 			displayNames: []string{"", "player1", "", "player2"},
-			expectValid: true,
-			description: "should handle empty strings properly",
+			expectValid:  true,
+			description:  "should handle empty strings properly",
 		},
 		{
-			name:        "all empty strings",
+			name:         "all empty strings",
 			displayNames: []string{"", "", ""},
-			expectValid: true,
-			description: "should handle all empty strings",
+			expectValid:  true,
+			description:  "should handle all empty strings",
 		},
 		{
-			name:        "special characters",
+			name:         "special characters",
 			displayNames: []string{"foo-bar", "foo_bar", "foo(bar)", "foo[bar]"},
-			expectValid: true,
-			description: "should handle special characters",
+			expectValid:  true,
+			description:  "should handle special characters",
 		},
 		{
-			name:        "original issue case",
+			name:         "original issue case",
 			displayNames: []string{"foo-bar", "foo-bar", "foo_bar", "foo-bar-(baz)"},
-			expectValid: true,
-			description: "should handle the original problematic case",
+			expectValid:  true,
+			description:  "should handle the original problematic case",
 		},
 	}
 
@@ -237,7 +237,7 @@ func TestDisplayNameOwnerSearchProcessing(t *testing.T) {
 			// Simulate the processing logic from DisplayNameOwnerSearch
 			nameMap := make(map[string]string, len(tt.displayNames))
 			sanitized := make([]string, 0, len(tt.displayNames))
-			
+
 			for _, dn := range tt.displayNames {
 				s := sanitizeDisplayName(dn)
 				s = strings.ToLower(s)
@@ -253,12 +253,12 @@ func TestDisplayNameOwnerSearchProcessing(t *testing.T) {
 			sanitized = slices.Compact(sanitized)
 
 			// Generate the regex pattern
-			regexPattern := Query.MatchItem(sanitized)
-			
+			regexPattern := Query.CreateMatchPattern(sanitized)
+
 			t.Logf("Input: %v", tt.displayNames)
 			t.Logf("Sanitized: %v", sanitized)
 			t.Logf("Regex pattern: %s", regexPattern)
-			
+
 			// Test that the regex pattern is valid
 			if regexPattern != "" {
 				_, err := regexp.Compile(regexPattern)

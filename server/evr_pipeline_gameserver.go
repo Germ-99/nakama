@@ -65,7 +65,7 @@ func (p *EvrPipeline) gameserverRegistrationRequest(logger *zap.Logger, session 
 	var (
 		loginSessionID = uuid.FromStringOrNil(request.LoginSessionId)
 		serverID       = request.ServerId
-		regionHash     = evr.Symbol(request.Region.GetValue())
+		regionHash     = evr.Symbol(request.Region)
 		internalIP     = net.ParseIP(request.InternalIpAddress)
 		externalIP     = net.ParseIP(session.ClientIP())
 		externalPort   = uint16(request.Port)

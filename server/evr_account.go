@@ -140,10 +140,7 @@ func (e EVRProfile) HasPasswordSet() bool {
 }
 
 func (e EVRProfile) TokenAuthRequired() bool {
-	if e.RequireTokenAuthentication {
-		return true
-	}
-	return false
+	return e.RequireTokenAuthentication
 }
 
 func (e EVRProfile) IsOnline() bool {

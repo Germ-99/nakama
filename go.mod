@@ -14,7 +14,6 @@ require (
 	github.com/echotools/vrmlgo/v5 v5.0.1
 	github.com/felixge/httpsnoop v1.0.4
 	github.com/go-redis/redis v6.15.9+incompatible
-	github.com/go-restruct/restruct v1.2.0-alpha
 	github.com/gofrs/uuid/v5 v5.3.2
 	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/google/go-cmp v0.7.0

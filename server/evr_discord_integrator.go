@@ -361,7 +361,7 @@ func (c *DiscordIntegrator) syncMember(ctx context.Context, logger *zap.Logger, 
 	group, ok := groups[groupID]
 	if !ok || group == nil {
 		// Add the player to the group
-		if err := c.nk.GroupUsersAdd(ctx, SystemUserID, groupID, []string{evrAccount.ID()}); err != nil {
+		if err := c.nk.GroupUsersAdd(ctx, SystemUserID, groupID, []string{profile.ID()}); err != nil {
 			return fmt.Errorf("error joining group: %w", err)
 		}
 
@@ -377,7 +377,7 @@ func (c *DiscordIntegrator) syncMember(ctx context.Context, logger *zap.Logger, 
 	}
 
 	// Update the group state with the member's roles.
-	if group.RoleCacheUpdate(evrAccount, member.Roles) {
+	if group.RoleCacheUpdate(profile, member.Roles) {
 		if err := GuildGroupStore(ctx, c.nk, c.guildGroupRegistry, group); err != nil {
 			return fmt.Errorf("error storing guild group: %w", err)
 		}
