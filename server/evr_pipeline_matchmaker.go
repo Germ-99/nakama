@@ -101,11 +101,10 @@ func (p *EvrPipeline) lobbyPingResponse(ctx context.Context, logger *zap.Logger,
 		limit          = 25
 	)
 
-	params, ok := LoadParams(ctx)
-	if !ok {
-		return fmt.Errorf("failed to load params from context")
+	latencyHistory = NewLatencyHistory()
+	if err := StorableRead(ctx, p.nk, session.UserID().String(), latencyHistory, false); err != nil {
+		logger.Warn("Failed to read latency history", zap.Error(err))
 	}
-	latencyHistory = params.latencyHistory.Load()
 
 	for _, result := range response.Results {
 		ip := result.ExternalIP
@@ -119,6 +118,14 @@ func (p *EvrPipeline) lobbyPingResponse(ctx context.Context, logger *zap.Logger,
 	if err := StorableWrite(ctx, p.nk, session.UserID().String(), latencyHistory); err != nil {
 		return status.Errorf(codes.Internal, "failed to write latency history: %v", err)
 	}
+
+	params, ok := LoadParams(ctx)
+	if !ok {
+		return fmt.Errorf("failed to load params from context")
+	}
+
+	params.latencyHistory.Store(latencyHistory)
+
 	return nil
 }
 
