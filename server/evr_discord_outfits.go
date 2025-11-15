@@ -17,7 +17,7 @@ func (w Wardrobe) StorageMeta() StorableMetadata {
 		Key:             WardrobeStorageKey,
 		PermissionRead:  runtime.STORAGE_PERMISSION_NO_READ,
 		PermissionWrite: runtime.STORAGE_PERMISSION_OWNER_WRITE,
-		Version:         "*", // Always overwrite for maps without version tracking
+		Version:         "", // Always overwrite for maps without version tracking
 	}
 }
 
